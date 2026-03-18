@@ -1,10 +1,6 @@
 # skillctl
 
-Manage agent skills across AI harnesses. Built with `git` source control in mind. By default, skills are **symlinked** — they live in one place and are linked into whichever harnesses and projects you choose, so updates to your skill repos propagate everywhere instantly. When you need a detached copy instead, use `--import`.
-
-No extra bells and whistles. By design, this is *not* a skill browser or search engine. It doesn't include any built-in skills.
-
-This a simple tool for explicitly specifying remote repositories / local directories as single sources of truth for agent skills. This let's you maintain version control via `git` without accidentally losing changes across multiple project directories.
+Manage agent skills across AI harnesses. By default, skills are **symlinked** — they live in one place and are linked into whichever harnesses and projects you choose, so updates to your skill repos propagate everywhere instantly. When you need a detached copy instead, use `--import`.
 
 ## Installation
 
@@ -12,8 +8,30 @@ This a simple tool for explicitly specifying remote repositories / local directo
 curl -fsSL https://raw.githubusercontent.com/r3b1s/skillctl/main/install.sh | bash
 # or
 bash install.sh          # update
-bash install.sh uninstall # uninstall
+bash install.sh uninstall
 ```
+
+## Supported harnesses
+
+skillctl has built-in support for the following AI coding harnesses:
+
+| Harness | Per-project directory | Global directory |
+|---|---|---|
+| Claude Code | `.claude/skills/<skill>` | `~/.claude/skills/<skill>` |
+| Cursor | `.cursor/skills/<skill>` | `~/.cursor/skills/<skill>` |
+| KiloCode | `.kilocode/skills/<skill>` | `~/.kilocode/skills/<skill>` |
+| GitHub Copilot | `.github/skills/<skill>` | `~/.github/skills/<skill>` |
+| cline | `.cline/skills/<skill>` | `~/.cline/skills/<skill>` |
+| goose | `.goose/skills/<skill>` | `~/.goose/skills/<skill>` |
+| pi | `.pi/skills/<skill>` | `~/.pi/skills/<skill>` |
+| Qwen | `.qwen/skills/<skill>` | `~/.qwen/skills/<skill>` |
+| OpenAI Codex | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+| OpenCode | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+| Gemini CLI | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+| amp | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+| Warp | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+
+Many harnesses have converged on `.agents/skills/` as a shared convention. When selecting harnesses during `skillctl link`, you'll see a **"Most harnesses (.agents/)"** shortcut at the top of the list — this targets the `.agents/skills/` directory and covers Codex, Gemini, amp, Warp, OpenCode, and any other tool that follows the same convention. If you're unsure which harness-specific directory to use, `.agents/` is a reasonable default since it gives you the widest coverage with a single symlink.
 
 ## Commands
 
