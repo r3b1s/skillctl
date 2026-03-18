@@ -19,6 +19,18 @@ curl -fsSL https://raw.githubusercontent.com/r3b1s/skillctl/main/install.sh | ba
 bash install.sh            # update
 bash install.sh uninstall  # uninstall
 ```
+### Arch Linux
+You can also install `skillctl` via the AUR (https://aur.archlinux.org/packages/skillctl).
+
+Just use your preferred package manager:
+
+```
+# yay
+yay -S skillctl
+
+# paru
+paru -S skillctl
+```
 
 ## Supported harnesses
 
