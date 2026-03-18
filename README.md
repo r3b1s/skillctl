@@ -1,14 +1,23 @@
 # skillctl
+Manage agent skills across AI harnesses. Built with `git` source control in mind. By default, skills are **symlinked** — they live in one place and are linked into whichever harnesses and projects you choose, so updates to your skill repos propagate everywhere instantly. When you need a detached copy instead, use `--import`.
 
-Manage agent skills across AI harnesses. By default, skills are **symlinked** — they live in one place and are linked into whichever harnesses and projects you choose, so updates to your skill repos propagate everywhere instantly. When you need a detached copy instead, use `--import`.
+No extra bells and whistles. By design, this is *not* a skill browser or search engine. It doesn't include any built-in skills.
+
+This a simple tool for explicitly specifying remote repositories / local directories as single sources of truth for agent skills. This let's you maintain version control via `git` without accidentally losing changes across multiple project directories.
+
+
+https://github.com/user-attachments/assets/4b9c91a7-24e8-467b-a8e8-28ccef5079d7
+
+
+
 
 ## Installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/r3b1s/skillctl/main/install.sh | bash
 # or
-bash install.sh          # update
-bash install.sh uninstall
+bash install.sh            # update
+bash install.sh uninstall  # uninstall
 ```
 
 ## Supported harnesses
