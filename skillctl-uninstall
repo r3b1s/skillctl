@@ -1,0 +1,100 @@
+#!/bin/bash
+set -euo pipefail
+
+SKILLCTL_CONFIG="${HOME}/.config/skillctl"
+META_FILE="${SKILLCTL_CONFIG}/.install-meta"
+
+die() { echo "error: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+meta_get() {
+  local key="$1"
+  [[ -f "$META_FILE" ]] || { echo ""; return; }
+  grep "^${key}=" "$META_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || echo ""
+}
+
+remove_path() {
+  local path="$1"
+  if [[ -w "$(dirname "$path")" ]]; then
+    rm -f "$path"
+  else
+    sudo rm -f "$path"
+  fi
+}
+
+command -v gum &>/dev/null || die "gum is required for interactive prompts."
+
+[[ "$(meta_get "managed_by")" == "skillctl-installer" ]] || die \
+  "This installation is not managed by the skillctl installer. Uninstall it with your system package manager."
+
+echo
+echo "==> Uninstalling skillctl"
+echo
+
+local_install_dir="$(meta_get "install_dir")"
+[[ -n "$local_install_dir" ]] || die "Cannot find installer metadata for skillctl."
+
+remove_gum=false
+remove_config=false
+gum_managed_by="$(meta_get "gum_managed_by")"
+
+if [[ -n "$gum_managed_by" ]]; then
+  if gum confirm "Remove gum? (it was installed by this script)"; then
+    remove_gum=true
+  fi
+  echo
+fi
+
+if [[ -d "$SKILLCTL_CONFIG" ]]; then
+  gum style --foreground 196 \
+    "WARNING: Removing config data will also remove all installed skill repos and their symlinks from your system."
+  echo
+  if gum confirm "Remove all skillctl data (${SKILLCTL_CONFIG})?"; then
+    remove_config=true
+  fi
+  echo
+fi
+
+skillctl_bin="${local_install_dir}/skillctl"
+if [[ -f "$skillctl_bin" ]]; then
+  remove_path "$skillctl_bin"
+  info "Removed ${skillctl_bin}"
+fi
+
+update_bin="${local_install_dir}/skillctl-update"
+if [[ -f "$update_bin" ]]; then
+  remove_path "$update_bin"
+  info "Removed ${update_bin}"
+fi
+
+uninstall_bin="${local_install_dir}/skillctl-uninstall"
+if [[ -f "$uninstall_bin" ]]; then
+  remove_path "$uninstall_bin"
+  info "Removed ${uninstall_bin}"
+fi
+
+if $remove_gum; then
+  if [[ "$gum_managed_by" == "binary" ]]; then
+    gum_path="$(meta_get "gum_path")"
+    if [[ -n "$gum_path" && -f "$gum_path" ]]; then
+      remove_path "$gum_path"
+      info "Removed ${gum_path}"
+    fi
+  else
+    info "gum was installed via ${gum_managed_by} — remove it manually:"
+    case "$gum_managed_by" in
+      pacman) info "  sudo pacman -R gum" ;;
+      dnf)    info "  sudo dnf remove gum" ;;
+      brew)   info "  brew uninstall gum" ;;
+    esac
+  fi
+fi
+
+if $remove_config; then
+  rm -rf "$SKILLCTL_CONFIG"
+  info "Removed ${SKILLCTL_CONFIG}"
+elif [[ -f "$META_FILE" ]]; then
+  rm -f "$META_FILE"
+fi
+
+echo "skillctl uninstalled."

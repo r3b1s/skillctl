@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+SKILLCTL_CONFIG="${HOME}/.config/skillctl"
+META_FILE="${SKILLCTL_CONFIG}/.install-meta"
+REPO_URL="https://github.com/r3b1s/skillctl.git"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+meta_get() {
+  local key="$1"
+  [[ -f "$META_FILE" ]] || { echo ""; return; }
+  grep "^${key}=" "$META_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || echo ""
+}
+
+[[ "$(meta_get "managed_by")" == "skillctl-installer" ]] || die \
+  "This installation is not managed by the skillctl installer. Update it with your system package manager."
+
+install_method="$(meta_get "install_method")"
+case "$install_method" in
+  local)
+    install_source="$(meta_get "install_source")"
+    [[ -n "$install_source" ]] || die "Missing install source metadata for local installation."
+    [[ -x "${install_source}/install.sh" ]] || die "Cannot find install.sh in ${install_source}. Update from that checkout manually."
+    cd "$install_source"
+    ./install.sh update
+    ;;
+  remote)
+    command -v git &>/dev/null || die "git is required to update a remote-installed copy of skillctl"
+    tmpdir="$(mktemp -d)"
+    cleanup() {
+      [[ -d "$tmpdir" ]] && rm -rf "$tmpdir"
+    }
+    trap cleanup EXIT
+    git clone --depth 1 "$REPO_URL" "$tmpdir/skillctl"
+    cd "$tmpdir/skillctl"
+    SKILLCTL_INSTALL_METHOD=remote ./install.sh update
+    ;;
+  *)
+    die "Unknown install method '${install_method:-}' in installer metadata."
+    ;;
+esac

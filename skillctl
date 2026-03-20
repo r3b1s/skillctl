@@ -2,10 +2,13 @@
 set -euo pipefail
 
 SKILLCTL_DIR="${HOME}/.config/skillctl"
-REPOS_DIR="${SKILLCTL_DIR}/repos"
+DEFAULT_REPOS_DIR="${SKILLCTL_DIR}/repos"
+CONFIG_FILE="${SKILLCTL_DIR}/config.toml"
 IMPORTS_FILE="${SKILLCTL_DIR}/imports"
 MANIFEST_FILE="${SKILLCTL_DIR}/managed"
+ORPHANS_FILE="${SKILLCTL_DIR}/orphans"
 MANIFEST_MIGRATING=false
+REPOS_DIR=""
 
 # Harness name -> skill directory pattern (relative, <name> is placeholder)
 declare -A HARNESSES=(
@@ -27,14 +30,420 @@ declare -A HARNESSES=(
 # Special shortcut that resolves to the .agents/ path shared by most harnesses
 UNIVERSAL_HARNESS="Most harnesses (.agents/) — Codex, Gemini, amp, Warp, OpenCode, etc. Not Claude Code, Cursor, KiloCode, or others with unique paths"
 
+# Explicit presentation order for the interactive harness picker.
+HARNESS_PROMPT_ORDER=(
+  "$UNIVERSAL_HARNESS"
+  "Claude Code"
+  "OpenCode"
+  "pi"
+  "OpenAI Codex"
+  "Gemini CLI"
+  "Cursor"
+  "KiloCode"
+  "GitHub Copilot"
+  "Warp"
+  "amp"
+  "cline"
+  "goose"
+  "Qwen"
+)
+
 die() { echo "error: $*" >&2; exit 1; }
 
 require_gum() {
   command -v gum &>/dev/null || die "gum is required but not installed. Install it: https://github.com/charmbracelet/gum"
 }
 
+gum_confirm_tty() {
+  gum confirm "$@" </dev/tty
+}
+
+ensure_config_dir() {
+  mkdir -p "$SKILLCTL_DIR"
+}
+
+normalize_absolute_path() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  if [[ "$path" == "~" ]]; then
+    path="$HOME"
+  elif [[ "$path" == "~/"* ]]; then
+    path="${HOME}/${path#"~/"}"
+  fi
+  if [[ "$path" != /* ]]; then
+    path="$(pwd)/$path"
+  fi
+  printf '%s\n' "$path"
+}
+
+config_get_clone_at() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  sed -n 's/^[[:space:]]*clone-at[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$CONFIG_FILE" | head -1
+}
+
+resolve_repos_dir() {
+  local configured
+  configured="$(config_get_clone_at)"
+  if [[ -n "$configured" ]]; then
+    printf '%s\n' "$configured"
+  else
+    printf '%s\n' "$DEFAULT_REPOS_DIR"
+  fi
+}
+
+set_repos_dir() {
+  REPOS_DIR="$(resolve_repos_dir)"
+}
+
+write_config() {
+  local clone_at="$1"
+  ensure_config_dir
+  cat > "$CONFIG_FILE" <<EOF
+clone-at = "$clone_at"
+EOF
+}
+
 ensure_dirs() {
+  ensure_config_dir
+  set_repos_dir
   mkdir -p "$REPOS_DIR"
+}
+
+active_repos_dir_exists() {
+  set_repos_dir
+  [[ -d "$REPOS_DIR" ]]
+}
+
+require_active_repos_dir() {
+  set_repos_dir
+  if [[ ! -d "$REPOS_DIR" ]]; then
+    die "configured clone-at directory does not exist: ${REPOS_DIR}"
+  fi
+}
+
+list_repo_dirs_under() {
+  local base="$1"
+  [[ -d "$base" ]] || return 0
+  find "$base" -mindepth 1 -maxdepth 1 -type d | sort
+}
+
+repo_has_active_managed_entries() {
+  local repo_name="$1"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local remainder origin
+    remainder="${line#*|}"
+    origin="${remainder#*|}"
+    [[ "$origin" == "${repo_name}/"* ]] && return 0
+  done < <(manifest_list_all)
+  return 1
+}
+
+orphan_add() {
+  local repo_name="$1" repo_path="$2"
+  ensure_config_dir
+  orphan_remove "$repo_name"
+  echo "${repo_name}|${repo_path}" >> "$ORPHANS_FILE"
+}
+
+orphan_remove() {
+  local repo_name="$1"
+  [[ -f "$ORPHANS_FILE" ]] || return 0
+  local tmp
+  tmp=$(grep -E -v "^${repo_name//\//\\/}\|" "$ORPHANS_FILE" || true)
+  printf '%s\n' "$tmp" > "$ORPHANS_FILE"
+}
+
+orphan_list_all() {
+  [[ -f "$ORPHANS_FILE" ]] && grep -v '^$' "$ORPHANS_FILE" 2>/dev/null || true
+}
+
+manifest_remove_origin() {
+  local origin="$1"
+  manifest_migrate_legacy_imports
+  [[ -f "$MANIFEST_FILE" ]] || return 0
+  local tmp
+  tmp=$(awk -F'|' -v origin="$origin" '$3 != origin' "$MANIFEST_FILE" || true)
+  printf '%s\n' "$tmp" > "$MANIFEST_FILE"
+}
+
+manifest_entries_for_origin() {
+  local origin="$1"
+  manifest_list_all | awk -F'|' -v origin="$origin" '$3 == origin'
+}
+
+tracked_symlink_entries_for_repo() {
+  local repo_name="$1"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local entry_type remainder path entry_origin
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    entry_origin="${remainder#*|}"
+    [[ "$entry_type" == "symlink" && "$entry_origin" == "${repo_name}/"* ]] || continue
+    if symlink_entry_is_valid "$path" "$entry_origin"; then
+      echo "$line"
+    fi
+  done < <(manifest_list_all)
+}
+
+relink_repo_managed_symlinks() {
+  local repo_name="$1"
+  local origin path skill_name target_path
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    origin="${line##*|}"
+    path="${line#*|}"
+    path="${path%%|*}"
+    skill_name="${origin#*/}"
+    target_path="${REPOS_DIR}/${repo_name}/skills/${skill_name}"
+
+    rm -f "$path"
+    mkdir -p "$(dirname "$path")"
+    ln -s "$target_path" "$path"
+    echo "relinked: ${path} -> ${target_path}"
+  done < <(tracked_symlink_entries_for_repo "$repo_name")
+}
+
+remove_repo_entries_from_manifest() {
+  local repo_name="$1"
+  local entry_type remainder path origin
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    origin="${remainder#*|}"
+    [[ "$origin" == "${repo_name}/"* ]] || continue
+    manifest_remove "$path"
+  done < <(manifest_list_all)
+}
+
+move_repo_dir() {
+  local source_dir="$1" dest_dir="$2"
+  mv "$source_dir" "$dest_dir"
+}
+
+handle_repo_conflict() {
+  local repo_name="$1" source_dir="$2" dest_dir="$3"
+  while true; do
+    local choice
+    choice="$(printf '%s\n' "Skip" "Overwrite" "Abort" | gum choose --header "Destination exists for ${repo_name}: ${dest_dir}")" || return 1
+    case "$choice" in
+      "Skip")
+        echo "skipped migration for ${repo_name}"
+        return 10
+        ;;
+      "Overwrite")
+        rm -rf "$dest_dir"
+        move_repo_dir "$source_dir" "$dest_dir"
+        return 0
+        ;;
+      "Abort")
+        return 20
+        ;;
+    esac
+  done
+}
+
+handle_repo_migration_failure() {
+  local repo_name="$1" message="$2"
+  while true; do
+    local choice
+    choice="$(printf '%s\n' "Skip" "Retry" "Abort" | gum choose --header "Migration failed for ${repo_name}: ${message}")" || return 1
+    case "$choice" in
+      "Skip") return 10 ;;
+      "Retry") return 11 ;;
+      "Abort") return 20 ;;
+    esac
+  done
+}
+
+maybe_create_clone_at_dir() {
+  local target_dir="$1"
+  if [[ -e "$target_dir" && ! -d "$target_dir" ]]; then
+    die "clone-at path exists and is not a directory: ${target_dir}"
+  fi
+  if [[ ! -d "$target_dir" ]]; then
+    require_gum
+    gum_confirm_tty "Create clone-at directory ${target_dir}?" || die "aborted"
+    mkdir -p "$target_dir"
+  fi
+}
+
+cmd_config_set_clone_at() {
+  require_gum
+  [[ $# -ge 1 ]] || die "usage: skillctl config set clone-at <path> [--migrate] [--yes|-y]"
+
+  local target_dir_raw="$1"
+  shift
+  local target_dir migrate_requested=false assume_yes=false
+  target_dir="$(normalize_absolute_path "$target_dir_raw")" || die "invalid clone-at path"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --migrate) migrate_requested=true; shift ;;
+      --yes|-y) assume_yes=true; shift ;;
+      *) die "unknown flag for config set clone-at: $1" ;;
+    esac
+  done
+
+  local current_repos_dir
+  current_repos_dir="$(resolve_repos_dir)"
+  if [[ "$target_dir" == "$current_repos_dir" ]]; then
+    maybe_create_clone_at_dir "$target_dir"
+    write_config "$target_dir"
+    set_repos_dir
+    echo "clone-at unchanged: ${target_dir}"
+    return 0
+  fi
+
+  maybe_create_clone_at_dir "$target_dir"
+
+  local existing_repos=()
+  while IFS= read -r repo_dir; do
+    [[ -n "$repo_dir" ]] && existing_repos+=("$repo_dir")
+  done < <(list_repo_dirs_under "$current_repos_dir")
+
+  local do_migrate=false
+  if [[ ${#existing_repos[@]} -gt 0 ]]; then
+    if $migrate_requested; then
+      do_migrate=true
+    elif $assume_yes; then
+      do_migrate=true
+    else
+      echo ""
+      echo "${#existing_repos[@]} installed repo(s) found in ${current_repos_dir}:"
+      printf '  %s\n' "${existing_repos[@]##*/}"
+      echo ""
+      if gum_confirm_tty "Migrate existing repos to ${target_dir}?"; then
+        do_migrate=true
+      fi
+    fi
+  fi
+
+  if ! $do_migrate; then
+    write_config "$target_dir"
+    set_repos_dir
+    echo "set clone-at to ${target_dir}"
+    return 0
+  fi
+
+  local migrated=()
+  local orphaned=()
+  local source_dir dest_dir repo_name
+
+  for source_dir in "${existing_repos[@]}"; do
+    [[ -d "$source_dir" ]] || continue
+    repo_name="$(basename "$source_dir")"
+    dest_dir="${target_dir}/${repo_name}"
+
+    while true; do
+      if [[ -e "$dest_dir" ]]; then
+        if handle_repo_conflict "$repo_name" "$source_dir" "$dest_dir"; then
+          :
+        else
+          local conflict_status=$?
+          if [[ $conflict_status -eq 10 ]]; then
+            remove_repo_entries_from_manifest "$repo_name"
+            orphan_add "$repo_name" "$source_dir"
+            orphaned+=("${repo_name}|${source_dir}|destination exists")
+            break
+          elif [[ $conflict_status -eq 20 ]]; then
+            die "migration aborted"
+          else
+            die "migration aborted"
+          fi
+        fi
+      else
+        if move_repo_dir "$source_dir" "$dest_dir"; then
+          :
+        else
+          local move_status=$?
+          local decision_status
+          handle_repo_migration_failure "$repo_name" "move failed with exit code ${move_status}"
+          decision_status=$?
+          if [[ $decision_status -eq 10 ]]; then
+            remove_repo_entries_from_manifest "$repo_name"
+            orphan_add "$repo_name" "$source_dir"
+            orphaned+=("${repo_name}|${source_dir}|move failed")
+            break
+          elif [[ $decision_status -eq 11 ]]; then
+            continue
+          else
+            die "migration aborted"
+          fi
+        fi
+      fi
+
+      migrated+=("$repo_name")
+      orphan_remove "$repo_name"
+      break
+    done
+  done
+
+  write_config "$target_dir"
+  set_repos_dir
+
+  local repo
+  for repo in "${migrated[@]}"; do
+    relink_repo_managed_symlinks "$repo"
+  done
+
+  echo "set clone-at to ${target_dir}"
+  if [[ ${#migrated[@]} -gt 0 ]]; then
+    echo ""
+    echo "migrated repos:"
+    printf '  %s\n' "${migrated[@]}"
+  fi
+
+  if [[ ${#orphaned[@]} -gt 0 ]]; then
+    echo ""
+    echo "orphaned repos:"
+    local orphan_entry orphan_name orphan_path orphan_reason
+    for orphan_entry in "${orphaned[@]}"; do
+      orphan_name="${orphan_entry%%|*}"
+      orphan_path="${orphan_entry#*|}"
+      orphan_reason="${orphan_path#*|}"
+      orphan_path="${orphan_path%%|*}"
+      echo "  ${orphan_name} (${orphan_reason})"
+      echo "    ${orphan_path}"
+    done
+  fi
+}
+
+cmd_config_list() {
+  local clone_at
+  clone_at="$(resolve_repos_dir)"
+  echo "clone-at = ${clone_at}"
+}
+
+cmd_config() {
+  [[ $# -ge 1 ]] || die "usage: skillctl config <set|list> ..."
+  case "$1" in
+    set)
+      shift
+      [[ $# -ge 1 ]] || die "usage: skillctl config set clone-at <path> [--migrate] [--yes|-y]"
+      case "$1" in
+        clone-at)
+          shift
+          cmd_config_set_clone_at "$@"
+          ;;
+        *)
+          die "unknown config key: $1"
+          ;;
+      esac
+      ;;
+    list)
+      shift
+      [[ $# -eq 0 ]] || die "usage: skillctl config list"
+      cmd_config_list
+      ;;
+    *)
+      die "unknown config command: $1"
+      ;;
+  esac
 }
 
 # ── managed state tracking ───────────────────────────────────────────────────
@@ -266,6 +675,7 @@ cmd_install() {
 # ── interactive skill picker ─────────────────────────────────────────────────
 
 pick_skills() {
+  require_active_repos_dir
   local all_skills=()
   for repo_dir in "${REPOS_DIR}"/*/; do
     [[ -d "$repo_dir" ]] || continue
@@ -285,11 +695,8 @@ pick_skills() {
 }
 
 pick_harnesses() {
-  local harness_names
-  harness_names="$(printf '%s\n' "$UNIVERSAL_HARNESS" "${!HARNESSES[@]}" | sort)"
-
   local selected
-  selected="$(echo "$harness_names" | gum choose --no-limit --header "Select harnesses:")"
+  selected="$(printf '%s\n' "${HARNESS_PROMPT_ORDER[@]}" | gum choose --no-limit --header "Select harnesses:")"
   [[ -z "$selected" ]] && die "no harnesses selected"
   echo "$selected"
 }
@@ -298,17 +705,22 @@ pick_harnesses() {
 
 cmd_link() {
   require_gum
+  require_active_repos_dir
 
-  local skill_arg="" is_global=false project_dir="" import_mode=false
+  local skill_arg="" is_global=false project_dir="" import_mode=false force=false assume_yes=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --global)  is_global=true; shift ;;
       --import)  import_mode=true; shift ;;
+      --force|-f) force=true; shift ;;
+      --yes|-y)  assume_yes=true; shift ;;
       --project) project_dir="$2"; shift 2 ;;
       *)         skill_arg="$1"; shift ;;
     esac
   done
+
+  $assume_yes && ! $force && die "--yes requires --force"
 
   local base
   if $is_global; then
@@ -340,35 +752,51 @@ cmd_link() {
       $found || die "skill '${skill_arg}' not found in any repo"
     fi
   else
+    local selected_skills
+    selected_skills="$(pick_skills)" || return $?
     while IFS= read -r line; do
       [[ -n "$line" ]] && skills_to_link+=("$line")
-    done < <(pick_skills)
+    done <<< "$selected_skills"
   fi
 
   # Pick harnesses
   local selected_harnesses=()
+  local selected_harness_output
+  selected_harness_output="$(pick_harnesses)" || return $?
   while IFS= read -r line; do
     [[ -n "$line" ]] && selected_harnesses+=("$line")
-  done < <(pick_harnesses)
+  done <<< "$selected_harness_output"
 
-  # Create symlinks or copies
+  local import_entries=()
+  local import_sources=()
+  local import_targets=()
+  local overwrite_targets=()
+
+  # Build the import plan up front so overwrite confirmation happens once.
   for entry in "${skills_to_link[@]}"; do
     local repo_part="${entry%%/*}"
     local skill_part="${entry#*/}"
     local skill_source="${REPOS_DIR}/${repo_part}/skills/${skill_part}"
 
     while IFS= read -r target_dir; do
-      mkdir -p "$(dirname "$target_dir")"
-
-      # Handle existing target
-      if [[ -L "$target_dir" || -e "$target_dir" ]]; then
-        if $import_mode; then
-          if ! gum confirm "Overwrite ${target_dir}? Any local changes will be lost."; then
-            echo "skipped: ${target_dir}"
+      if $import_mode; then
+        if [[ -L "$target_dir" || -e "$target_dir" ]]; then
+          if ! $force; then
+            echo "skipped (existing target; rerun with --force): ${target_dir}"
             continue
           fi
-          rm -rf "$target_dir"
-        elif [[ -L "$target_dir" ]]; then
+          overwrite_targets+=("$target_dir")
+        fi
+        import_entries+=("$entry")
+        import_sources+=("$skill_source")
+        import_targets+=("$target_dir")
+        continue
+      fi
+
+      mkdir -p "$(dirname "$target_dir")"
+
+      if [[ -L "$target_dir" || -e "$target_dir" ]]; then
+        if [[ -L "$target_dir" ]]; then
           echo "already linked: ${target_dir}"
           continue
         else
@@ -377,24 +805,46 @@ cmd_link() {
         fi
       fi
 
-      if $import_mode; then
+      ln -s "$skill_source" "$target_dir"
+      manifest_add "symlink" "$target_dir" "$entry"
+      echo "linked: ${target_dir} -> ${skill_source}"
+    done < <(unique_harness_dirs "$skill_part" "$base" "${selected_harnesses[@]}")
+  done
+
+  if $import_mode; then
+    if [[ ${#overwrite_targets[@]} -gt 0 ]] && ! $assume_yes; then
+      echo ""
+      gum style --foreground 196 "WARNING: ${#overwrite_targets[@]} existing import target(s) will be overwritten."
+      gum style --foreground 196 "This removes whatever is currently at each destination, even if it is not tracked by skillctl."
+      printf '%s\n' "${overwrite_targets[@]}"
+      echo ""
+      gum_confirm_tty "Proceed with importing ${#import_targets[@]} skill(s), including these overwrites?" || { echo "aborted"; return 0; }
+    fi
+
+    local i
+    for ((i=0; i<${#import_targets[@]}; i++)); do
+      local entry="${import_entries[i]}"
+      local skill_source="${import_sources[i]}"
+      local target_dir="${import_targets[i]}"
+
+      mkdir -p "$(dirname "$target_dir")"
+      if [[ -L "$target_dir" || -e "$target_dir" ]]; then
+        rm -rf "$target_dir"
+      fi
+
         mkdir -p "$target_dir"
         cp -r "${skill_source}/." "$target_dir/"
         manifest_add "import" "$target_dir" "$entry"
         echo "imported: ${target_dir} (from ${entry})"
-      else
-        ln -s "$skill_source" "$target_dir"
-        manifest_add "symlink" "$target_dir" "$entry"
-        echo "linked: ${target_dir} -> ${skill_source}"
-      fi
-    done < <(unique_harness_dirs "$skill_part" "$base" "${selected_harnesses[@]}")
-  done
+    done
+  fi
 }
 
 # ── unlink ───────────────────────────────────────────────────────────────────
 
 cmd_unlink() {
   require_gum
+  require_active_repos_dir
 
   local skill_arg="" is_global=false project_dir=""
 
@@ -456,7 +906,7 @@ cmd_unlink() {
       gum style --foreground 196 "WARNING: ${import_path} is an imported copy, not a symlink."
       gum style --foreground 196 "Any changes you've made to these files will be lost."
       echo ""
-      if gum confirm "Remove ${import_path}?"; then
+      if gum_confirm_tty "Remove ${import_path}?"; then
         rm -rf "$import_path"
         manifest_remove "$import_path"
         echo "removed: ${import_path}"
@@ -471,6 +921,7 @@ cmd_unlink() {
 
 cmd_uninstall() {
   [[ $# -lt 1 ]] && die "usage: skillctl uninstall <repo-name>"
+  require_active_repos_dir
 
   local name="$1"
   local repo_dir="${REPOS_DIR}/${name}"
@@ -498,22 +949,26 @@ cmd_uninstall() {
 # ── update ───────────────────────────────────────────────────────────────────
 
 cmd_update() {
-  local found=false
-  for repo_dir in "${REPOS_DIR}"/*/; do
-    [[ -d "$repo_dir" ]] || continue
-    found=true
-    local name
-    name="$(basename "$repo_dir")"
+  if ! active_repos_dir_exists; then
+    echo "warning: configured clone-at directory does not exist: ${REPOS_DIR}"
+  else
+    local found=false
+    for repo_dir in "${REPOS_DIR}"/*/; do
+      [[ -d "$repo_dir" ]] || continue
+      found=true
+      local name
+      name="$(basename "$repo_dir")"
 
-    if [[ -d "${repo_dir}/.git" ]]; then
-      echo "updating ${name}..."
-      git -C "$repo_dir" pull --ff-only 2>&1 | sed 's/^/  /'
-    else
-      echo "skipping ${name} (not a git repo)"
-    fi
-  done
+      if [[ -d "${repo_dir}/.git" ]]; then
+        echo "updating ${name}..."
+        git -C "$repo_dir" pull --ff-only 2>&1 | sed 's/^/  /'
+      else
+        echo "skipping ${name} (not a git repo)"
+      fi
+    done
 
-  $found || echo "no repos installed"
+    $found || echo "no repos installed"
+  fi
 
   # Warn about imported skills that may be out of date
   local stale=()
@@ -534,7 +989,7 @@ cmd_update() {
     echo ""
     echo "Imported skills are detached copies and are not updated automatically."
     echo "To refresh, re-run the original link command with --import, e.g.:"
-    echo "  skillctl link <repo/skill> --import --global"
+    echo "  skillctl link <repo/skill> --import --force --global"
   fi
 }
 
@@ -652,45 +1107,63 @@ cmd_wipe() {
 cmd_list() {
   local found=false
 
-  for repo_dir in "${REPOS_DIR}"/*/; do
-    [[ -d "$repo_dir" ]] || continue
-    found=true
-    local repo_name
-    repo_name="$(basename "$repo_dir")"
+  if active_repos_dir_exists; then
+    for repo_dir in "${REPOS_DIR}"/*/; do
+      [[ -d "$repo_dir" ]] || continue
+      found=true
+      local repo_name
+      repo_name="$(basename "$repo_dir")"
 
-    echo -e "\033[1;34m${repo_name}\033[0m"
+      echo -e "\033[1;34m${repo_name}\033[0m"
 
-    while IFS= read -r skill; do
-      [[ -n "$skill" ]] || continue
+      while IFS= read -r skill; do
+        [[ -n "$skill" ]] || continue
 
-      local home_links home_imports has_any=false
-      home_links="$(find_links_for_skill "$skill" "$HOME")"
-      home_imports="$(find_imports_for_skill "$skill" "$HOME")"
+        local home_links home_imports has_any=false
+        home_links="$(find_links_for_skill "$skill" "$HOME")"
+        home_imports="$(find_imports_for_skill "$skill" "$HOME")"
 
-      if [[ -n "$home_links" ]]; then
-        has_any=true
-        echo -e "  \033[1;32m${skill}\033[0m (global, linked)"
-        while IFS= read -r link; do
-          echo -e "    \033[0;32m-> ${link}\033[0m"
-        done <<< "$home_links"
-      fi
+        if [[ -n "$home_links" ]]; then
+          has_any=true
+          echo -e "  \033[1;32m${skill}\033[0m (global, linked)"
+          while IFS= read -r link; do
+            echo -e "    \033[0;32m-> ${link}\033[0m"
+          done <<< "$home_links"
+        fi
 
-      if [[ -n "$home_imports" ]]; then
-        has_any=true
-        echo -e "  \033[1;33m${skill}\033[0m (global, imported)"
-        while IFS= read -r imp; do
-          echo -e "    \033[0;33m=> ${imp}\033[0m"
-        done <<< "$home_imports"
-      fi
+        if [[ -n "$home_imports" ]]; then
+          has_any=true
+          echo -e "  \033[1;33m${skill}\033[0m (global, imported)"
+          while IFS= read -r imp; do
+            echo -e "    \033[0;33m=> ${imp}\033[0m"
+          done <<< "$home_imports"
+        fi
 
-      if ! $has_any; then
-        echo -e "  \033[0;37m${skill}\033[0m (not linked)"
-      fi
-    done < <(list_skills_in_repo "$repo_dir")
-    echo
-  done
+        if ! $has_any; then
+          echo -e "  \033[0;37m${skill}\033[0m (not linked)"
+        fi
+      done < <(list_skills_in_repo "$repo_dir")
+      echo
+    done
+  else
+    echo "warning: configured clone-at directory does not exist: ${REPOS_DIR}"
+  fi
 
   $found || echo "no repos installed"
+
+  local orphan_found=false
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if ! $orphan_found; then
+      echo "Orphans"
+      orphan_found=true
+    fi
+    local orphan_name orphan_path
+    orphan_name="${line%%|*}"
+    orphan_path="${line#*|}"
+    echo "  ${orphan_name}"
+    echo "    ${orphan_path}"
+  done < <(orphan_list_all)
 }
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -701,7 +1174,9 @@ skillctl - manage agent skills across harnesses
 
 usage:
   skillctl install <url|local-path>       clone/copy a skill repo
-  skillctl link [skill] [--global] [--project <path>] [--import]
+  skillctl config set clone-at <path>     set where repos are cloned/copied
+  skillctl config list                    show current config values
+  skillctl link [skill] [--global] [--project <path>] [--import] [--force|-f] [--yes|-y]
   skillctl unlink [skill] [--global] [--project <path>]
   skillctl wipe [target-dir] [--global] [--imports] [--all] [--yes|-y]
   skillctl uninstall <repo-name>          remove repo and all symlinks
@@ -710,11 +1185,13 @@ usage:
 
 flags:
   --import   copy files instead of symlinking (link command only)
+  --force, -f overwrite an existing link/import target when used with --import
   --imports  also remove tracked imported copies (wipe command only)
+  --migrate  move installed repos when changing clone-at
   --global   target $HOME instead of current directory
   --all      target all tracked locations (wipe command only)
   --project  target a specific project directory
-  --yes, -y  skip confirmation prompts (wipe command only)
+  --yes, -y  skip confirmation prompts where supported
 
 notes:
   unlink removes both symlinks and imported copies. When removing an
@@ -724,6 +1201,7 @@ EOF
 
 case "${1:-}" in
   install)   shift; cmd_install "$@" ;;
+  config)    shift; cmd_config "$@" ;;
   link)      shift; cmd_link "$@" ;;
   unlink)    shift; cmd_unlink "$@" ;;
   wipe)      shift; cmd_wipe "$@" ;;

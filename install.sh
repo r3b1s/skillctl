@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-SKILLCTL_REPO="https://raw.githubusercontent.com/r3b1s/skillctl/main/skillctl"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUM_API="https://api.github.com/repos/charmbracelet/gum/releases/latest"
 SKILLCTL_CONFIG="${HOME}/.config/skillctl"
 META_FILE="${SKILLCTL_CONFIG}/.install-meta"
+INSTALL_METHOD="${SKILLCTL_INSTALL_METHOD:-local}"
 
 # Cleaned up on EXIT
 _TMPDIR=""
@@ -172,7 +173,7 @@ select_install_dir() {
   [[ ${#all_items[@]} -eq 0 ]] && die "No directories found in \$PATH."
 
   local chosen
-  chosen=$(printf '%s\n' "${all_items[@]}" | gum choose --header "Select installation directory:")
+  chosen=$(printf '%s\n' "${all_items[@]}" | gum choose --header "Select installation directory (showing current PATH entries):")
 
   if [[ "$chosen" == "$local_bin_label" ]]; then
     mkdir -p "$local_bin"
@@ -195,6 +196,24 @@ install_bin() {
   fi
 }
 
+install_repo_file() {
+  local name="$1" dest_dir="$2"
+  local src="${SCRIPT_DIR}/${name}"
+  [[ -f "$src" ]] || die "Required file not found: ${src}"
+  install_bin "$src" "$dest_dir" "$name"
+}
+
+write_install_metadata() {
+  meta_set "managed_by" "skillctl-installer"
+  meta_set "install_method" "$INSTALL_METHOD"
+  meta_set "install_dir" "$1"
+  if [[ "$INSTALL_METHOD" == "local" ]]; then
+    meta_set "install_source" "$SCRIPT_DIR"
+  else
+    meta_set "install_source" ""
+  fi
+}
+
 remove_path() {
   local path="$1"
   if [[ -w "$(dirname "$path")" ]]; then
@@ -208,7 +227,7 @@ remove_path() {
 
 cmd_install() {
   echo
-  echo "==> Installing skillctl"
+  echo "==> Installing skillctl (${INSTALL_METHOD})"
   echo
 
   ensure_gum
@@ -227,20 +246,18 @@ cmd_install() {
     meta_set "gum_managed_by" "$GUM_MANAGED_BY"
   fi
 
-  info "Downloading skillctl..."
-  local tmp_bin
-  tmp_bin=$(mktemp)
-  http_get "$SKILLCTL_REPO" "$tmp_bin"
-  chmod +x "$tmp_bin"
-
   info "Installing skillctl to ${install_dir}..."
-  install_bin "$tmp_bin" "$install_dir" "skillctl"
-  rm -f "$tmp_bin"
+  install_repo_file "skillctl" "$install_dir"
+  info "Installing skillctl-update to ${install_dir}..."
+  install_repo_file "skillctl-update" "$install_dir"
+  info "Installing skillctl-uninstall to ${install_dir}..."
+  install_repo_file "skillctl-uninstall" "$install_dir"
 
-  meta_set "install_dir" "$install_dir"
+  write_install_metadata "$install_dir"
 
   echo
   echo "Done. skillctl installed to ${install_dir}/skillctl"
+  echo "Run 'skillctl-uninstall' to remove this installer-managed copy."
   echo "Run 'skillctl --help' to get started."
 }
 
@@ -248,29 +265,26 @@ cmd_install() {
 
 cmd_update() {
   echo
-  echo "==> Updating skillctl"
+  echo "==> Updating skillctl from ${SCRIPT_DIR}"
   echo
+
+  local managed_by
+  managed_by=$(meta_get "managed_by")
+  [[ "$managed_by" == "skillctl-installer" ]] || die \
+    "This installation is not managed by the skillctl installer. Use your package manager or rerun install.sh install."
 
   local install_dir
   install_dir=$(meta_get "install_dir")
+  [[ -n "$install_dir" ]] || die "Cannot find installer metadata for skillctl."
 
-  if [[ -z "$install_dir" ]]; then
-    if command -v skillctl &>/dev/null; then
-      install_dir=$(dirname "$(command -v skillctl)")
-    else
-      die "Cannot find a previous skillctl installation. Run install first."
-    fi
-  fi
+  info "Installing skillctl to ${install_dir}..."
+  install_repo_file "skillctl" "$install_dir"
+  info "Installing skillctl-update to ${install_dir}..."
+  install_repo_file "skillctl-update" "$install_dir"
+  info "Installing skillctl-uninstall to ${install_dir}..."
+  install_repo_file "skillctl-uninstall" "$install_dir"
 
-  info "Downloading latest skillctl from GitHub..."
-  local tmp_bin
-  tmp_bin=$(mktemp)
-  http_get "$SKILLCTL_REPO" "$tmp_bin"
-  chmod +x "$tmp_bin"
-
-  info "Installing to ${install_dir}..."
-  install_bin "$tmp_bin" "$install_dir" "skillctl"
-  rm -f "$tmp_bin"
+  write_install_metadata "$install_dir"
 
   echo
   echo "skillctl updated."
@@ -279,80 +293,7 @@ cmd_update() {
 # ── uninstall ─────────────────────────────────────────────────────────────────
 
 cmd_uninstall() {
-  echo
-  echo "==> Uninstalling skillctl"
-  echo
-
-  command -v gum &>/dev/null || die "gum is required for interactive prompts."
-
-  local install_dir
-  install_dir=$(meta_get "install_dir")
-
-  if [[ -z "$install_dir" ]]; then
-    if command -v skillctl &>/dev/null; then
-      install_dir=$(dirname "$(command -v skillctl)")
-    else
-      die "Cannot find skillctl installation."
-    fi
-  fi
-
-  # Gather all decisions BEFORE taking any action so gum stays available
-  # throughout the entire prompt sequence.
-  local remove_gum=false remove_config=false
-  local gum_managed_by
-  gum_managed_by=$(meta_get "gum_managed_by")
-
-  if [[ -n "$gum_managed_by" ]]; then
-    if gum confirm "Remove gum? (it was installed by this script)"; then
-      remove_gum=true
-    fi
-    echo
-  fi
-
-  if [[ -d "$SKILLCTL_CONFIG" ]]; then
-    gum style --foreground 196 \
-      "WARNING: Removing config data will also remove all installed skill repos and their symlinks from your system."
-    echo
-    if gum confirm "Remove all skillctl data (${SKILLCTL_CONFIG})?"; then
-      remove_config=true
-    fi
-    echo
-  fi
-
-  # Perform removals
-  local skillctl_bin="${install_dir}/skillctl"
-  if [[ -f "$skillctl_bin" ]]; then
-    remove_path "$skillctl_bin"
-    info "Removed ${skillctl_bin}"
-  fi
-
-  if $remove_gum; then
-    if [[ "$gum_managed_by" == "binary" ]]; then
-      local gum_path
-      gum_path=$(meta_get "gum_path")
-      if [[ -n "$gum_path" && -f "$gum_path" ]]; then
-        remove_path "$gum_path"
-        info "Removed ${gum_path}"
-      fi
-    else
-      info "gum was installed via ${gum_managed_by} — remove it manually:"
-      case "$gum_managed_by" in
-        pacman) info "  sudo pacman -R gum" ;;
-        dnf)    info "  sudo dnf remove gum" ;;
-        brew)   info "  brew uninstall gum" ;;
-      esac
-    fi
-  fi
-
-  if $remove_config; then
-    rm -rf "$SKILLCTL_CONFIG"
-    info "Removed ${SKILLCTL_CONFIG}"
-  elif [[ -f "$META_FILE" ]]; then
-    # Config dir kept but meta file is now stale — remove it
-    rm -f "$META_FILE"
-  fi
-
-  echo "skillctl uninstalled."
+  "${SCRIPT_DIR}/skillctl-uninstall"
 }
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -362,9 +303,9 @@ usage() {
 install.sh — installer for skillctl
 
 Usage:
-  ./install.sh [install]   Install skillctl and gum (default)
-  ./install.sh update      Update skillctl to the latest version
-  ./install.sh uninstall   Remove skillctl from your system
+  ./install.sh [install]   Install skillctl from this checkout (default)
+  ./install.sh update      Update the installed files from this checkout
+  ./install.sh uninstall   Remove an installer-managed copy of skillctl
 EOF
 }
 

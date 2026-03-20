@@ -14,10 +14,19 @@ https://github.com/user-attachments/assets/4b9c91a7-24e8-467b-a8e8-28ccef5079d7
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r3b1s/skillctl/main/install.sh | bash
-# or
-bash install.sh            # update
-bash install.sh uninstall  # uninstall
+# One-liner install from GitHub
+curl -fsSL https://raw.githubusercontent.com/r3b1s/skillctl/main/install-remote.sh | bash
+
+# Local install from a git clone
+git clone https://github.com/r3b1s/skillctl.git
+cd skillctl
+bash install.sh
+
+# Update an installer-managed copy
+skillctl-update
+
+# Uninstall an installer-managed copy
+skillctl-uninstall
 ```
 ### Arch Linux
 You can also install `skillctl` via the AUR (https://aur.archlinux.org/packages/skillctl).
@@ -31,6 +40,8 @@ yay -S skillctl
 # paru
 paru -S skillctl
 ```
+
+When installed via a package manager, manage updates and uninstallation with that package manager. `skillctl-update` and `skillctl-uninstall` are only intended for copies installed by `install.sh` or `install-remote.sh`.
 
 ## Supported harnesses
 
@@ -75,7 +86,33 @@ The repo must contain a `skills/` directory at its root. Each subdirectory insid
 
 ---
 
-### `skillctl link [skill] [--global] [--project <path>] [--import]`
+### `skillctl config set clone-at <path>`
+
+Change the directory where skill repos are cloned or copied. By default, skillctl uses `~/.config/skillctl/repos`. The configured path is stored in `~/.config/skillctl/config.toml`.
+
+If repos are already installed in the current active clone directory, skillctl will ask whether you want to migrate them. Successful migrations move the repo, tear down tracked symlinks for that repo, and re-link them to the new location. Repos that fail migration are added to `~/.config/skillctl/orphans` for visibility.
+
+```bash
+# Change the active clone location
+skillctl config set clone-at ~/Library/Mobile\ Documents/com~apple~CloudDocs/skillctl/repos
+
+# Change the active clone location and request migration up front
+skillctl config set clone-at ~/Dropbox/skillctl/repos --migrate
+```
+
+If you choose not to migrate, the new path becomes active immediately and the old repos are left in place as unmanaged leftovers.
+
+### `skillctl config list`
+
+Show the current config values, including the active clone location.
+
+```bash
+skillctl config list
+```
+
+---
+
+### `skillctl link [skill] [--global] [--project <path>] [--import] [--force|-f] [--yes|-y]`
 
 Symlink one or more skills into one or more harnesses. Without flags, links into the current directory. `--global` links into `$HOME`.
 
@@ -102,9 +139,17 @@ skillctl link my-skills/my-skill --import --global
 
 # Import into a specific project
 skillctl link my-skills/my-skill --import --project ~/dev/myproject
+
+# Overwrite an existing imported target after confirmation
+skillctl link my-skills/my-skill --import --force --project ~/dev/myproject
+
+# Overwrite an existing imported target without prompting
+skillctl link my-skills/my-skill --import --force --yes --project ~/dev/myproject
 ```
 
-Managed symlinks and imported copies are tracked in `~/.config/skillctl/managed`. Imported copies are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import`.
+If an import target already exists, `skillctl link --import` will leave it in place unless you add `--force` (or `-f`). With `--force`, skillctl shows one confirmation for the whole batch and lists every destination that will be overwritten. That overwrite applies whether or not the existing path is tracked by skillctl. Add `--yes` (or `-y`) to skip the prompt.
+
+Managed symlinks and imported copies are tracked in `~/.config/skillctl/managed`. Imported copies are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import --force`.
 
 ---
 
@@ -153,7 +198,7 @@ skillctl wipe --all
 
 ### `skillctl update`
 
-`git pull` all installed repos. Because skills are symlinked, every project that references them picks up the changes with no further action.
+`git pull` all installed repos in the currently active clone directory. Because skills are symlinked, every project that references them picks up the changes with no further action.
 
 ```bash
 skillctl update
@@ -173,7 +218,7 @@ skillctl uninstall my-skills
 
 ### `skillctl list`
 
-Show all installed repos, their skills, and where each skill is currently linked.
+Show all installed repos from the active clone directory, their skills, and where each skill is currently linked. If migration left any orphaned repos behind, they are shown in a separate `Orphans` section.
 
 ```bash
 skillctl list
@@ -181,7 +226,7 @@ skillctl list
 
 ## Why symlinks by default?
 
-skillctl's default mode symlinks skills rather than copying them. Every harness directory that "has" a skill is actually pointing at a single source of truth — the cloned repo under `~/.config/skillctl/repos/`. This means:
+skillctl's default mode symlinks skills rather than copying them. Every harness directory that "has" a skill is actually pointing at a single source of truth — the cloned repo under the active `clone-at` directory. By default, that is `~/.config/skillctl/repos/`. This means:
 
 - Edit a skill once, every project sees it immediately.
 - Use SSH URLs for your own repos: `git push` and the skill updates everywhere, no re-import needed.
