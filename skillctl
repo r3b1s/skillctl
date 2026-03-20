@@ -4,6 +4,8 @@ set -euo pipefail
 SKILLCTL_DIR="${HOME}/.config/skillctl"
 REPOS_DIR="${SKILLCTL_DIR}/repos"
 IMPORTS_FILE="${SKILLCTL_DIR}/imports"
+MANIFEST_FILE="${SKILLCTL_DIR}/managed"
+MANIFEST_MIGRATING=false
 
 # Harness name -> skill directory pattern (relative, <name> is placeholder)
 declare -A HARNESSES=(
@@ -35,42 +37,86 @@ ensure_dirs() {
   mkdir -p "$REPOS_DIR"
 }
 
-# ── import tracking ──────────────────────────────────────────────────────────
-# Format: path=repo/skill  (one per line)
+# ── managed state tracking ───────────────────────────────────────────────────
+# Manifest format: type|path|origin
 
-import_add() {
-  local path="$1" origin="$2"
+manifest_migrate_legacy_imports() {
+  $MANIFEST_MIGRATING && return 0
   ensure_dirs
-  # Remove existing entry for this path, then append
-  if [[ -f "$IMPORTS_FILE" ]]; then
-    local tmp
-    tmp=$(grep -v "^${path}=" "$IMPORTS_FILE" || true)
-    printf '%s\n' "$tmp" > "$IMPORTS_FILE"
-  fi
-  echo "${path}=${origin}" >> "$IMPORTS_FILE"
-}
-
-import_remove() {
-  local path="$1"
   [[ -f "$IMPORTS_FILE" ]] || return 0
+  MANIFEST_MIGRATING=true
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local path origin
+    path="${line%%=*}"
+    origin="${line#*=}"
+    [[ -n "$path" && -n "$origin" ]] || continue
+    manifest_add "import" "$path" "$origin"
+  done < "$IMPORTS_FILE"
+
+  rm -f "$IMPORTS_FILE"
+  MANIFEST_MIGRATING=false
+}
+
+manifest_add() {
+  local entry_type="$1" path="$2" origin="$3"
+  ensure_dirs
+  manifest_migrate_legacy_imports
+  if [[ -f "$MANIFEST_FILE" ]]; then
+    manifest_remove "$path"
+  fi
+  echo "${entry_type}|${path}|${origin}" >> "$MANIFEST_FILE"
+}
+
+manifest_remove() {
+  local path="$1"
+  manifest_migrate_legacy_imports
+  [[ -f "$MANIFEST_FILE" ]] || return 0
   local tmp
-  tmp=$(grep -v "^${path}=" "$IMPORTS_FILE" || true)
-  printf '%s\n' "$tmp" > "$IMPORTS_FILE"
+  tmp=$(grep -F -v "|${path}|" "$MANIFEST_FILE" || true)
+  printf '%s\n' "$tmp" > "$MANIFEST_FILE"
 }
 
-import_is_tracked() {
+manifest_get_entry() {
   local path="$1"
-  [[ -f "$IMPORTS_FILE" ]] && grep -q "^${path}=" "$IMPORTS_FILE" 2>/dev/null
+  manifest_migrate_legacy_imports
+  [[ -f "$MANIFEST_FILE" ]] || return 0
+  grep -F "|${path}|" "$MANIFEST_FILE" 2>/dev/null | head -1 || true
 }
 
-import_get_origin() {
+manifest_is_tracked() {
   local path="$1"
-  [[ -f "$IMPORTS_FILE" ]] || { echo ""; return; }
-  grep "^${path}=" "$IMPORTS_FILE" 2>/dev/null | head -1 | cut -d= -f2- || echo ""
+  [[ -n "$(manifest_get_entry "$path")" ]]
 }
 
-import_list_all() {
-  [[ -f "$IMPORTS_FILE" ]] && grep -v '^$' "$IMPORTS_FILE" 2>/dev/null || true
+manifest_get_type() {
+  local path="$1" entry
+  entry="$(manifest_get_entry "$path")"
+  [[ -n "$entry" ]] && printf '%s\n' "${entry%%|*}" || true
+}
+
+manifest_get_origin() {
+  local path="$1" entry remainder
+  entry="$(manifest_get_entry "$path")"
+  [[ -n "$entry" ]] || return 0
+  remainder="${entry#*|}"
+  remainder="${remainder#*|}"
+  printf '%s\n' "$remainder"
+}
+
+manifest_list_all() {
+  manifest_migrate_legacy_imports
+  [[ -f "$MANIFEST_FILE" ]] && grep -v '^$' "$MANIFEST_FILE" 2>/dev/null || true
+}
+
+symlink_entry_is_valid() {
+  local path="$1" origin="$2"
+  local repo_part="${origin%%/*}"
+  local skill_part="${origin#*/}"
+  local expected_target="${REPOS_DIR}/${repo_part}/skills/${skill_part}"
+  [[ -L "$path" ]] || return 1
+  [[ "$(readlink "$path")" == "$expected_target" ]]
 }
 
 # Extract repo name from a URL or path
@@ -109,7 +155,7 @@ find_links_for_skill() {
     done
     $already && continue
     seen+=("$target")
-    if [[ -L "$target" ]]; then
+    if [[ "$(manifest_get_type "$target")" == "symlink" ]] && symlink_entry_is_valid "$target" "$(manifest_get_origin "$target")"; then
       echo "$target"
     fi
   done
@@ -128,10 +174,34 @@ find_imports_for_skill() {
     done
     $already && continue
     seen+=("$target")
-    if [[ -d "$target" && ! -L "$target" ]] && import_is_tracked "$target"; then
+    if [[ -d "$target" && ! -L "$target" ]] && [[ "$(manifest_get_type "$target")" == "import" ]]; then
       echo "$target"
     fi
   done
+}
+
+find_tracked_entries_in_base() {
+  local base="$1" include_imports="$2"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local entry_type remainder path origin
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    origin="${remainder#*|}"
+
+    [[ "$path" == "${base}/"* ]] || continue
+
+    if [[ "$entry_type" == "symlink" ]]; then
+      if symlink_entry_is_valid "$path" "$origin"; then
+        echo "${entry_type}|${path}|${origin}"
+      fi
+    elif [[ "$entry_type" == "import" && "$include_imports" == "true" ]]; then
+      if [[ -d "$path" && ! -L "$path" ]]; then
+        echo "${entry_type}|${path}|${origin}"
+      fi
+    fi
+  done < <(manifest_list_all)
 }
 
 # Get unique harness dirs for selected harnesses
@@ -310,10 +380,11 @@ cmd_link() {
       if $import_mode; then
         mkdir -p "$target_dir"
         cp -r "${skill_source}/." "$target_dir/"
-        import_add "$target_dir" "$entry"
+        manifest_add "import" "$target_dir" "$entry"
         echo "imported: ${target_dir} (from ${entry})"
       else
         ln -s "$skill_source" "$target_dir"
+        manifest_add "symlink" "$target_dir" "$entry"
         echo "linked: ${target_dir} -> ${skill_source}"
       fi
     done < <(unique_harness_dirs "$skill_part" "$base" "${selected_harnesses[@]}")
@@ -375,6 +446,7 @@ cmd_unlink() {
     # Remove symlinks
     while IFS= read -r link; do
       rm "$link"
+      manifest_remove "$link"
       echo "unlinked: ${link}"
     done < <(find_links_for_skill "$skill_name" "$base")
 
@@ -386,7 +458,7 @@ cmd_unlink() {
       echo ""
       if gum confirm "Remove ${import_path}?"; then
         rm -rf "$import_path"
-        import_remove "$import_path"
+        manifest_remove "$import_path"
         echo "removed: ${import_path}"
       else
         echo "skipped: ${import_path}"
@@ -411,8 +483,9 @@ cmd_uninstall() {
     while IFS= read -r link; do
       local target
       target="$(readlink "$link")"
-      if [[ "$target" == "${repo_dir}/"* ]]; then
+      if [[ "$target" == "${repo_dir}/"* ]] && [[ "$(manifest_get_type "$link")" == "symlink" ]] && [[ "$(manifest_get_origin "$link")" == "${name}/${skill}" ]]; then
         rm "$link"
+        manifest_remove "$link"
         echo "unlinked: ${link}"
       fi
     done < <(find "$HOME" -type l -lname "${repo_dir}/*" 2>/dev/null || true)
@@ -446,11 +519,13 @@ cmd_update() {
   local stale=()
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    local path origin
-    path="${line%%=*}"
-    origin="${line#*=}"
-    [[ -d "$path" ]] && stale+=("  ${path}  (imported from ${origin})")
-  done < <(import_list_all)
+    local entry_type remainder path origin
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    origin="${remainder#*|}"
+    [[ "$entry_type" == "import" && -d "$path" ]] && stale+=("  ${path}  (imported from ${origin})")
+  done < <(manifest_list_all)
 
   if [[ ${#stale[@]} -gt 0 ]]; then
     echo ""
@@ -461,6 +536,115 @@ cmd_update() {
     echo "To refresh, re-run the original link command with --import, e.g.:"
     echo "  skillctl link <repo/skill> --import --global"
   fi
+}
+
+# ── wipe ─────────────────────────────────────────────────────────────────────
+
+cmd_wipe() {
+  require_gum
+
+  local target_arg="" is_global=false include_imports=false assume_yes=false wipe_all=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global) is_global=true; shift ;;
+      --imports) include_imports=true; shift ;;
+      --all) wipe_all=true; shift ;;
+      --yes|-y) assume_yes=true; shift ;;
+      *) target_arg="$1"; shift ;;
+    esac
+  done
+
+  $is_global && [[ -n "$target_arg" ]] && die "cannot use --global with a target directory"
+
+  local base
+  if $wipe_all; then
+    base=""
+  elif $is_global; then
+    base="$HOME"
+  else
+    base="${target_arg:-$(pwd)}"
+  fi
+
+  local entries=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && entries+=("$line")
+  done < <(
+    if $wipe_all; then
+      manifest_list_all | while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local entry_type remainder path origin
+        entry_type="${line%%|*}"
+        remainder="${line#*|}"
+        path="${remainder%%|*}"
+        origin="${remainder#*|}"
+        if [[ "$entry_type" == "symlink" ]]; then
+          if symlink_entry_is_valid "$path" "$origin"; then
+            echo "$line"
+          fi
+        elif $include_imports && [[ "$entry_type" == "import" ]] && [[ -d "$path" && ! -L "$path" ]]; then
+          echo "$line"
+        fi
+      done
+    else
+      find_tracked_entries_in_base "$base" "$include_imports"
+    fi
+  )
+
+  [[ ${#entries[@]} -gt 0 ]] || { echo "nothing to wipe"; return 0; }
+
+  local symlink_count=0 import_count=0
+  for line in "${entries[@]}"; do
+    local entry_type="${line%%|*}"
+    if [[ "$entry_type" == "symlink" ]]; then
+      ((symlink_count+=1))
+    else
+      ((import_count+=1))
+    fi
+  done
+
+  local scope_desc
+  if $wipe_all; then
+    scope_desc="all tracked locations"
+  elif $is_global; then
+    scope_desc="$HOME"
+  else
+    scope_desc="$base"
+  fi
+
+  if ! $assume_yes; then
+    local prompt="Remove ${symlink_count} tracked symlink(s)"
+    if $include_imports; then
+      prompt="${prompt} and ${import_count} tracked imported copy/copies"
+    fi
+    prompt="${prompt} under ${scope_desc}?"
+    gum confirm "$prompt" || { echo "aborted"; return 0; }
+
+    if $include_imports && [[ $import_count -gt 0 ]]; then
+      echo ""
+      gum style --foreground 196 "WARNING: imported copies are real directories, not symlinks."
+      gum style --foreground 196 "Any local changes inside those tracked imports will be permanently deleted."
+      echo ""
+      gum confirm "Proceed with removing ${import_count} tracked imported copy/copies?" || { echo "aborted"; return 0; }
+    fi
+  fi
+
+  for line in "${entries[@]}"; do
+    local entry_type remainder path
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+
+    if [[ "$entry_type" == "symlink" ]]; then
+      rm "$path"
+      manifest_remove "$path"
+      echo "wiped symlink: ${path}"
+    elif [[ "$entry_type" == "import" ]]; then
+      rm -rf "$path"
+      manifest_remove "$path"
+      echo "wiped import: ${path}"
+    fi
+  done
 }
 
 # ── list ─────────────────────────────────────────────────────────────────────
@@ -519,14 +703,18 @@ usage:
   skillctl install <url|local-path>       clone/copy a skill repo
   skillctl link [skill] [--global] [--project <path>] [--import]
   skillctl unlink [skill] [--global] [--project <path>]
+  skillctl wipe [target-dir] [--global] [--imports] [--all] [--yes|-y]
   skillctl uninstall <repo-name>          remove repo and all symlinks
   skillctl update                         git pull all repos
   skillctl list                           show repos, skills, and link status
 
 flags:
   --import   copy files instead of symlinking (link command only)
+  --imports  also remove tracked imported copies (wipe command only)
   --global   target $HOME instead of current directory
+  --all      target all tracked locations (wipe command only)
   --project  target a specific project directory
+  --yes, -y  skip confirmation prompts (wipe command only)
 
 notes:
   unlink removes both symlinks and imported copies. When removing an
@@ -538,6 +726,7 @@ case "${1:-}" in
   install)   shift; cmd_install "$@" ;;
   link)      shift; cmd_link "$@" ;;
   unlink)    shift; cmd_unlink "$@" ;;
+  wipe)      shift; cmd_wipe "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   update)    shift; cmd_update "$@" ;;
   list)      shift; cmd_list "$@" ;;

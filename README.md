@@ -104,7 +104,7 @@ skillctl link my-skills/my-skill --import --global
 skillctl link my-skills/my-skill --import --project ~/dev/myproject
 ```
 
-Imported copies are tracked in `~/.config/skillctl/imports`. They are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import`.
+Managed symlinks and imported copies are tracked in `~/.config/skillctl/managed`. Imported copies are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import`.
 
 ---
 
@@ -121,6 +121,33 @@ skillctl unlink my-skill --global
 ```
 
 When removing an imported copy (as opposed to a symlink), you'll be warned that any local changes will be lost and prompted to confirm before deletion.
+
+---
+
+### `skillctl wipe [target-dir] [--global] [--imports] [--all] [--yes|-y]`
+
+Clear a whole target location rather than removing skills one by one. By default, `wipe` removes tracked symlinks under the current directory's harness skill folders.
+
+```bash
+# Remove all tracked symlinks under the current project
+skillctl wipe
+
+# Remove all tracked symlinks under a specific project
+skillctl wipe ~/dev/myproject
+
+# Remove all tracked global symlinks
+skillctl wipe --global
+
+# Also remove tracked imported copies
+skillctl wipe --imports
+
+# Remove every tracked symlink everywhere
+skillctl wipe --all
+```
+
+`wipe` only removes files and directories explicitly tracked by `skillctl`. Unmanaged directories are ignored, even if they live under a harness skills folder. With `--imports`, `wipe` also removes tracked imported copies after an additional warning that local changes will be permanently deleted.
+
+`--all` ignores the target directory and wipes every tracked symlink in the managed state file. Combined with `--imports`, it also removes every tracked imported copy.
 
 ---
 
