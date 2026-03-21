@@ -2,7 +2,7 @@
 
 ## AUR automation
 
-Publishing a GitHub release now triggers [`.github/workflows/release-aur.yml`](../.github/workflows/release-aur.yml). That workflow:
+Publishing a GitHub release now triggers [`.github/workflows/release-aur.yml`](../.github/workflows/release-aur.yml). The same workflow can also be run manually with a `release_tag` input if you need to retry AUR publishing without cutting another release. That workflow:
 
 1. Validates the release tag format (`v0.1.1`).
 2. Downloads the GitHub tag archive and computes its SHA-256 checksum.
@@ -40,6 +40,8 @@ Then add the private key as an Actions secret:
 4. Watch the `Publish AUR Package` workflow in the Actions tab.
 
 If the workflow succeeds, the AUR package repo should contain updated `PKGBUILD` and `.SRCINFO` for that release.
+
+If you need to retry an existing release after fixing workflow configuration or secrets, open the workflow in the Actions tab, choose `Run workflow`, and enter the existing tag such as `v0.1.1` in the `release_tag` field.
 
 ## Notes
 
