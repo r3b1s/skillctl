@@ -16,7 +16,7 @@ jobs:
       AUR_SSH_KEY_PATH: ~/.ssh/aur
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Validate release tag
         env:

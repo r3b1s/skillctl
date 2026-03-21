@@ -155,7 +155,9 @@ orphan_remove() {
 }
 
 orphan_list_all() {
-  [[ -f "$ORPHANS_FILE" ]] && grep -v '^$' "$ORPHANS_FILE" 2>/dev/null || true
+  if [[ -f "$ORPHANS_FILE" ]]; then
+    grep -v '^$' "$ORPHANS_FILE" 2>/dev/null || true
+  fi
 }
 
 manifest_remove_origin() {
@@ -502,7 +504,9 @@ manifest_is_tracked() {
 manifest_get_type() {
   local path="$1" entry
   entry="$(manifest_get_entry "$path")"
-  [[ -n "$entry" ]] && printf '%s\n' "${entry%%|*}" || true
+  if [[ -n "$entry" ]]; then
+    printf '%s\n' "${entry%%|*}"
+  fi
 }
 
 manifest_get_origin() {
@@ -516,7 +520,9 @@ manifest_get_origin() {
 
 manifest_list_all() {
   manifest_migrate_legacy_imports
-  [[ -f "$MANIFEST_FILE" ]] && grep -v '^$' "$MANIFEST_FILE" 2>/dev/null || true
+  if [[ -f "$MANIFEST_FILE" ]]; then
+    grep -v '^$' "$MANIFEST_FILE" 2>/dev/null || true
+  fi
 }
 
 symlink_entry_is_valid() {
