@@ -98,7 +98,9 @@ _install_gum_binary() {
   GUM_MANAGED_BY="binary"
 
   # Make gum immediately usable for the rest of this script
-  export PATH="$(dirname "$gum_bin"):$PATH"
+  local gum_dir
+  gum_dir="$(dirname "$gum_bin")"
+  export PATH="${gum_dir}:$PATH"
 }
 
 ensure_gum() {

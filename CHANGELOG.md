@@ -37,3 +37,10 @@
 
 - Updated CLI help text and README examples to document the new `link --import --force [--yes]` workflow.
 - Updated installation documentation to cover the local installer, remote bootstrapper, and installer-managed update and uninstall flow.
+
+### Release Process
+
+- Added a GitHub Actions release workflow to render `PKGBUILD`, regenerate `.SRCINFO`, and push AUR package updates automatically when a GitHub release is published.
+- Added AUR packaging metadata scaffolding under `packaging/aur/` so release automation uses a tracked `PKGBUILD` template and render script instead of inlined workflow logic.
+- Added a GitHub Actions shell CI workflow that runs `shellcheck` and `bash -n` on the project scripts, with CI configured to fail on `info`, `warning`, and `error` severity findings while still printing full ShellCheck output.
+- Added maintainer-facing release documentation for the AUR publishing workflow and required GitHub secret setup.

@@ -1,0 +1,100 @@
+name: Publish AUR Package
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  publish-aur:
+    runs-on: ubuntu-latest
+    env:
+      AUR_PACKAGE_NAME: skillctl
+      AUR_SSH_KEY_PATH: ~/.ssh/aur
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+(\.[0-9]+)*([.-][A-Za-z0-9]+)?$ ]] || {
+            echo "Release tag must look like v0.1.1, got: ${RELEASE_TAG}" >&2
+            exit 1
+          }
+
+      - name: Compute release archive checksum
+        id: tarball
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          archive_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          curl -fsSL "${archive_url}" -o release.tar.gz
+          archive_sha256="$(sha256sum release.tar.gz | awk '{print $1}')"
+          {
+            echo "archive_url=${archive_url}"
+            echo "archive_sha256=${archive_sha256}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Render PKGBUILD
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          ARCHIVE_SHA256: ${{ steps.tarball.outputs.archive_sha256 }}
+        run: |
+          set -euo pipefail
+          ./packaging/aur/render-pkgbuild.sh "${RELEASE_TAG}" "${ARCHIVE_SHA256}" packaging/aur/PKGBUILD
+
+      - name: Configure AUR SSH key
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "${AUR_SSH_PRIVATE_KEY}" ]] || {
+            echo "Missing required secret: AUR_SSH_PRIVATE_KEY" >&2
+            exit 1
+          }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${AUR_SSH_KEY_PATH}"
+          chmod 600 "${AUR_SSH_KEY_PATH}"
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Clone AUR repository
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes
+        run: |
+          set -euo pipefail
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" aur
+
+      - name: Update AUR package files
+        run: |
+          set -euo pipefail
+          cp packaging/aur/PKGBUILD aur/PKGBUILD
+          docker run --rm \
+            -v "${PWD}/aur:/work" \
+            -w /work \
+            archlinux:base-devel \
+            bash -lc 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Commit and push to AUR
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes
+        run: |
+          set -euo pipefail
+          cd aur
+          if git diff --quiet; then
+            echo "AUR repository already matches ${RELEASE_TAG}."
+            exit 0
+          fi
+          git config user.name "r3g1s"
+          git config user.email "21206554+r3b1s@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${RELEASE_TAG}"
+          git push origin master

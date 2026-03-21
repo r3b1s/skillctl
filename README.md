@@ -43,6 +43,10 @@ paru -S skillctl
 
 When installed via a package manager, manage updates and uninstallation with that package manager. `skillctl-update` and `skillctl-uninstall` are only intended for copies installed by `install.sh` or `install-remote.sh`.
 
+### Maintainer release automation
+
+This repo includes GitHub Actions automation for publishing AUR updates when a GitHub release is published. The one-time AUR SSH setup and release steps are documented in [`docs/releasing.md`](docs/releasing.md).
+
 ## Supported harnesses
 
 skillctl has built-in support for the following AI coding harnesses:

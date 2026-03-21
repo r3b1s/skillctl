@@ -67,8 +67,8 @@ normalize_absolute_path() {
   [[ -n "$path" ]] || return 1
   if [[ "$path" == "~" ]]; then
     path="$HOME"
-  elif [[ "$path" == "~/"* ]]; then
-    path="${HOME}/${path#"~/"}"
+  elif [[ "$path" == ~/* ]]; then
+    path="${HOME}/${path:2}"
   fi
   if [[ "$path" != /* ]]; then
     path="$(pwd)/$path"
@@ -668,7 +668,9 @@ cmd_install() {
     echo "warning: no skills found in ${name}/skills/"
   else
     echo "installed skills:"
-    echo "$skills" | sed 's/^/  /'
+    while IFS= read -r skill; do
+      printf '  %s\n' "$skill"
+    done <<< "$skills"
   fi
 }
 
