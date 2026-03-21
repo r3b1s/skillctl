@@ -100,6 +100,7 @@ jobs:
           set -euo pipefail
           cp packaging/aur/PKGBUILD aur/PKGBUILD
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -v "${PWD}/aur:/work" \
             -w /work \
             archlinux:base-devel \
