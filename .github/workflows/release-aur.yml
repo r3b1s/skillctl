@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AUR_PACKAGE_NAME: skillctl
-      AUR_SSH_KEY_PATH: ~/.ssh/aur
+      AUR_SSH_KEY_PATH: $HOME/.ssh/aur
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -67,7 +67,7 @@ jobs:
 
       - name: Clone AUR repository
         env:
-          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes
+          GIT_SSH_COMMAND: ssh -i "$HOME/.ssh/aur" -o IdentitiesOnly=yes
         run: |
           set -euo pipefail
           git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" aur
@@ -85,7 +85,7 @@ jobs:
       - name: Commit and push to AUR
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o IdentitiesOnly=yes
+          GIT_SSH_COMMAND: ssh -i "$HOME/.ssh/aur" -o IdentitiesOnly=yes
         run: |
           set -euo pipefail
           cd aur
