@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       AUR_PACKAGE_NAME: skillctl
-      AUR_SSH_KEY_PATH: $HOME/.ssh/aur
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -78,19 +77,20 @@ jobs:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          aur_ssh_key_path="${HOME}/.ssh/aur"
           [[ -n "${AUR_SSH_PRIVATE_KEY}" ]] || {
             echo "Missing required secret: AUR_SSH_PRIVATE_KEY" >&2
             exit 1
           }
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${AUR_SSH_KEY_PATH}"
-          chmod 600 "${AUR_SSH_KEY_PATH}"
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${aur_ssh_key_path}"
+          chmod 600 "${aur_ssh_key_path}"
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
 
       - name: Clone AUR repository
         env:
-          GIT_SSH_COMMAND: ssh -i "$HOME/.ssh/aur" -o IdentitiesOnly=yes
+          GIT_SSH_COMMAND: ssh -i ${HOME}/.ssh/aur -o IdentitiesOnly=yes
         run: |
           set -euo pipefail
           git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE_NAME}.git" aur
@@ -108,7 +108,7 @@ jobs:
       - name: Commit and push to AUR
         env:
           RELEASE_TAG: ${{ steps.release_tag.outputs.release_tag }}
-          GIT_SSH_COMMAND: ssh -i "$HOME/.ssh/aur" -o IdentitiesOnly=yes
+          GIT_SSH_COMMAND: ssh -i ${HOME}/.ssh/aur -o IdentitiesOnly=yes
         run: |
           set -euo pipefail
           cd aur
