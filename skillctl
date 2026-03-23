@@ -802,7 +802,7 @@ infer_base_for_target() {
   for harness in "${!HARNESSES[@]}"; do
     rel="${HARNESSES[$harness]/<name>/$skill_name}"
     if [[ "$path" == */"${rel}" ]]; then
-      printf '%s\n' "${path%/${rel}}"
+      printf '%s\n' "${path%/"${rel}"}"
       return 0
     fi
   done
