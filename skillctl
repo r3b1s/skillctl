@@ -4,16 +4,19 @@ set -euo pipefail
 SKILLCTL_DIR="${HOME}/.config/skillctl"
 DEFAULT_REPOS_DIR="${SKILLCTL_DIR}/repos"
 CONFIG_FILE="${SKILLCTL_DIR}/config.toml"
-IMPORTS_FILE="${SKILLCTL_DIR}/imports"
-MANIFEST_FILE="${SKILLCTL_DIR}/managed"
-ORPHANS_FILE="${SKILLCTL_DIR}/orphans"
+DEFAULT_STATE_DIR_MODE="config"
+CLONE_AT_STATE_SUBDIR=".skillctl-state"
+STATE_DIR=""
+IMPORTS_FILE=""
+MANIFEST_FILE=""
+ORPHANS_FILE=""
 MANIFEST_MIGRATING=false
 REPOS_DIR=""
 
 # Harness name -> skill directory pattern (relative, <name> is placeholder)
 declare -A HARNESSES=(
   ["Claude Code"]=".claude/skills/<name>"
-  ["OpenAI Codex"]=".agents/skills/<name>"
+  ["OpenAI Codex"]=".codex/skills/<name>"
   ["OpenCode"]=".agents/skills/<name>"
   ["KiloCode"]=".kilocode/skills/<name>"
   ["Gemini CLI"]=".agents/skills/<name>"
@@ -28,7 +31,7 @@ declare -A HARNESSES=(
 )
 
 # Special shortcut that resolves to the .agents/ path shared by most harnesses
-UNIVERSAL_HARNESS="Most harnesses (.agents/) — Codex, Gemini, amp, Warp, OpenCode, etc. Not Claude Code, Cursor, KiloCode, or others with unique paths"
+UNIVERSAL_HARNESS="Most harnesses (.agents/) — Gemini, amp, Warp, OpenCode, etc. Not OpenAI Codex, Claude Code, Cursor, KiloCode, or others with unique paths"
 
 # Explicit presentation order for the interactive harness picker.
 HARNESS_PROMPT_ORDER=(
@@ -73,12 +76,41 @@ normalize_absolute_path() {
   if [[ "$path" != /* ]]; then
     path="$(pwd)/$path"
   fi
+  if [[ -d "$path" ]]; then
+    path="$(cd "$path" && pwd -P)"
+  else
+    while [[ "$path" == */./ ]]; do
+      path="${path%./}"
+    done
+    [[ "$path" == */. ]] && path="${path%/.}"
+    while [[ "$path" != "/" && "$path" == */ ]]; do
+      path="${path%/}"
+    done
+  fi
   printf '%s\n' "$path"
 }
 
 config_get_clone_at() {
   [[ -f "$CONFIG_FILE" ]] || return 0
   sed -n 's/^[[:space:]]*clone-at[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$CONFIG_FILE" | head -1
+}
+
+config_get_state_dir_mode() {
+  [[ -f "$CONFIG_FILE" ]] || {
+    printf '%s\n' "$DEFAULT_STATE_DIR_MODE"
+    return 0
+  }
+
+  local mode
+  mode="$(sed -n 's/^[[:space:]]*state-dir[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$CONFIG_FILE" | head -1)"
+  if [[ -z "$mode" ]]; then
+    mode="$DEFAULT_STATE_DIR_MODE"
+  fi
+
+  case "$mode" in
+    config|clone-at) printf '%s\n' "$mode" ;;
+    *) die "invalid state-dir in ${CONFIG_FILE}: ${mode} (expected \"config\" or \"clone-at\")" ;;
+  esac
 }
 
 resolve_repos_dir() {
@@ -95,18 +127,40 @@ set_repos_dir() {
   REPOS_DIR="$(resolve_repos_dir)"
 }
 
+resolve_state_dir() {
+  local mode
+  mode="$(config_get_state_dir_mode)"
+  if [[ "$mode" == "clone-at" ]]; then
+    printf '%s\n' "${REPOS_DIR}/${CLONE_AT_STATE_SUBDIR}"
+  else
+    printf '%s\n' "$SKILLCTL_DIR"
+  fi
+}
+
+set_state_paths() {
+  [[ -n "$REPOS_DIR" ]] || set_repos_dir
+  STATE_DIR="$(resolve_state_dir)"
+  IMPORTS_FILE="${STATE_DIR}/imports"
+  MANIFEST_FILE="${STATE_DIR}/managed"
+  ORPHANS_FILE="${STATE_DIR}/orphans"
+}
+
 write_config() {
   local clone_at="$1"
+  local state_dir_mode="${2:-$(config_get_state_dir_mode)}"
   ensure_config_dir
   cat > "$CONFIG_FILE" <<EOF
 clone-at = "$clone_at"
+state-dir = "$state_dir_mode"
 EOF
 }
 
 ensure_dirs() {
   ensure_config_dir
   set_repos_dir
+  set_state_paths
   mkdir -p "$REPOS_DIR"
+  mkdir -p "$STATE_DIR"
 }
 
 active_repos_dir_exists() {
@@ -123,8 +177,14 @@ require_active_repos_dir() {
 
 list_repo_dirs_under() {
   local base="$1"
+  set_repos_dir
+  set_state_paths
   [[ -d "$base" ]] || return 0
-  find "$base" -mindepth 1 -maxdepth 1 -type d | sort
+  while IFS= read -r repo_dir; do
+    [[ -n "$repo_dir" ]] || continue
+    [[ "$repo_dir" == "$STATE_DIR" ]] && continue
+    printf '%s\n' "$repo_dir"
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d | sort)
 }
 
 repo_has_active_managed_entries() {
@@ -141,13 +201,14 @@ repo_has_active_managed_entries() {
 
 orphan_add() {
   local repo_name="$1" repo_path="$2"
-  ensure_config_dir
+  ensure_dirs
   orphan_remove "$repo_name"
   echo "${repo_name}|${repo_path}" >> "$ORPHANS_FILE"
 }
 
 orphan_remove() {
   local repo_name="$1"
+  set_state_paths
   [[ -f "$ORPHANS_FILE" ]] || return 0
   local tmp
   tmp=$(grep -E -v "^${repo_name//\//\\/}\|" "$ORPHANS_FILE" || true)
@@ -155,6 +216,7 @@ orphan_remove() {
 }
 
 orphan_list_all() {
+  set_state_paths
   if [[ -f "$ORPHANS_FILE" ]]; then
     grep -v '^$' "$ORPHANS_FILE" 2>/dev/null || true
   fi
@@ -264,13 +326,37 @@ handle_repo_migration_failure() {
 
 maybe_create_clone_at_dir() {
   local target_dir="$1"
+  local assume_yes="${2:-false}"
   if [[ -e "$target_dir" && ! -d "$target_dir" ]]; then
     die "clone-at path exists and is not a directory: ${target_dir}"
   fi
   if [[ ! -d "$target_dir" ]]; then
+    if [[ "$assume_yes" == "true" ]]; then
+      mkdir -p "$target_dir"
+      return 0
+    fi
     require_gum
     gum_confirm_tty "Create clone-at directory ${target_dir}?" || die "aborted"
     mkdir -p "$target_dir"
+  fi
+}
+
+move_state_dir_contents() {
+  local source_dir="$1" dest_dir="$2"
+  [[ "$source_dir" != "$dest_dir" ]] || return 0
+  [[ -d "$source_dir" ]] || return 0
+
+  mkdir -p "$dest_dir"
+  local entry found=false
+  shopt -s dotglob nullglob
+  for entry in "$source_dir"/*; do
+    found=true
+    mv "$entry" "$dest_dir/"
+  done
+  shopt -u dotglob nullglob
+
+  if $found; then
+    rmdir "$source_dir" 2>/dev/null || true
   fi
 }
 
@@ -293,15 +379,22 @@ cmd_config_set_clone_at() {
 
   local current_repos_dir
   current_repos_dir="$(resolve_repos_dir)"
+  local state_dir_mode current_state_dir target_state_dir
+  state_dir_mode="$(config_get_state_dir_mode)"
+  if [[ "$state_dir_mode" == "clone-at" ]]; then
+    current_state_dir="${current_repos_dir}/${CLONE_AT_STATE_SUBDIR}"
+    target_state_dir="${target_dir}/${CLONE_AT_STATE_SUBDIR}"
+  fi
   if [[ "$target_dir" == "$current_repos_dir" ]]; then
-    maybe_create_clone_at_dir "$target_dir"
-    write_config "$target_dir"
+    maybe_create_clone_at_dir "$target_dir" "$assume_yes"
+    write_config "$target_dir" "$state_dir_mode"
     set_repos_dir
+    set_state_paths
     echo "clone-at unchanged: ${target_dir}"
     return 0
   fi
 
-  maybe_create_clone_at_dir "$target_dir"
+  maybe_create_clone_at_dir "$target_dir" "$assume_yes"
 
   local existing_repos=()
   while IFS= read -r repo_dir; do
@@ -326,8 +419,9 @@ cmd_config_set_clone_at() {
   fi
 
   if ! $do_migrate; then
-    write_config "$target_dir"
+    write_config "$target_dir" "$state_dir_mode"
     set_repos_dir
+    set_state_paths
     echo "set clone-at to ${target_dir}"
     return 0
   fi
@@ -385,8 +479,18 @@ cmd_config_set_clone_at() {
     done
   done
 
-  write_config "$target_dir"
+  if [[ "$state_dir_mode" == "clone-at" && -d "$current_state_dir" && "$current_state_dir" != "$target_state_dir" ]]; then
+    if [[ -e "$target_state_dir" ]]; then
+      echo "warning: leaving existing shared state in place at ${target_state_dir}"
+      echo "warning: previous shared state remains at ${current_state_dir}"
+    else
+      mv "$current_state_dir" "$target_state_dir"
+    fi
+  fi
+
+  write_config "$target_dir" "$state_dir_mode"
   set_repos_dir
+  set_state_paths
 
   local repo
   for repo in "${migrated[@]}"; do
@@ -415,10 +519,63 @@ cmd_config_set_clone_at() {
   fi
 }
 
+cmd_config_set_state_dir() {
+  [[ $# -ge 1 ]] || die "usage: skillctl config set state-dir <config|clone-at>"
+
+  local target_mode="$1"
+  shift
+  [[ $# -eq 0 ]] || die "usage: skillctl config set state-dir <config|clone-at>"
+
+  case "$target_mode" in
+    config|clone-at) ;;
+    *) die "invalid state-dir: ${target_mode} (expected \"config\" or \"clone-at\")" ;;
+  esac
+
+  local clone_at current_mode current_state_dir target_state_dir
+  clone_at="$(resolve_repos_dir)"
+  current_mode="$(config_get_state_dir_mode)"
+
+  if [[ "$target_mode" == "$current_mode" ]]; then
+    write_config "$clone_at" "$target_mode"
+    set_repos_dir
+    set_state_paths
+    echo "state-dir unchanged: ${target_mode}"
+    return 0
+  fi
+
+  if [[ "$current_mode" == "clone-at" ]]; then
+    current_state_dir="${clone_at}/${CLONE_AT_STATE_SUBDIR}"
+  else
+    current_state_dir="${SKILLCTL_DIR}"
+  fi
+
+  if [[ "$target_mode" == "clone-at" ]]; then
+    maybe_create_clone_at_dir "$clone_at" true
+    target_state_dir="${clone_at}/${CLONE_AT_STATE_SUBDIR}"
+  else
+    ensure_config_dir
+    target_state_dir="${SKILLCTL_DIR}"
+  fi
+
+  move_state_dir_contents "$current_state_dir" "$target_state_dir"
+
+  write_config "$clone_at" "$target_mode"
+  set_repos_dir
+  set_state_paths
+
+  echo "set state-dir to ${target_mode}"
+}
+
 cmd_config_list() {
   local clone_at
   clone_at="$(resolve_repos_dir)"
+  local state_dir_mode
+  state_dir_mode="$(config_get_state_dir_mode)"
+  set_repos_dir
+  set_state_paths
   echo "clone-at = ${clone_at}"
+  echo "state-dir = ${state_dir_mode}"
+  echo "state-path = ${STATE_DIR}"
 }
 
 cmd_config() {
@@ -426,11 +583,15 @@ cmd_config() {
   case "$1" in
     set)
       shift
-      [[ $# -ge 1 ]] || die "usage: skillctl config set clone-at <path> [--migrate] [--yes|-y]"
+      [[ $# -ge 1 ]] || die "usage: skillctl config set <clone-at|state-dir> ..."
       case "$1" in
         clone-at)
           shift
           cmd_config_set_clone_at "$@"
+          ;;
+        state-dir)
+          shift
+          cmd_config_set_state_dir "$@"
           ;;
         *)
           die "unknown config key: $1"
@@ -617,6 +778,35 @@ find_tracked_entries_in_base() {
       fi
     fi
   done < <(manifest_list_all)
+}
+
+find_manifest_entries_in_base() {
+  local base="$1" include_imports="$2"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local entry_type remainder path
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+
+    [[ "$path" == "${base}/"* ]] || continue
+    if [[ "$entry_type" == "symlink" || "$include_imports" == "true" ]]; then
+      echo "$line"
+    fi
+  done < <(manifest_list_all)
+}
+
+infer_base_for_target() {
+  local path="$1" skill_name="$2"
+  local harness rel
+  for harness in "${!HARNESSES[@]}"; do
+    rel="${HARNESSES[$harness]/<name>/$skill_name}"
+    if [[ "$path" == */"${rel}" ]]; then
+      printf '%s\n' "${path%/${rel}}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Get unique harness dirs for selected harnesses
@@ -1005,12 +1195,13 @@ cmd_update() {
 
 cmd_wipe() {
   require_gum
+  set_repos_dir
 
   local target_arg="" is_global=false include_imports=false assume_yes=false wipe_all=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --global) is_global=true; shift ;;
+      --global|-g) is_global=true; shift ;;
       --imports) include_imports=true; shift ;;
       --all) wipe_all=true; shift ;;
       --yes|-y) assume_yes=true; shift ;;
@@ -1027,6 +1218,7 @@ cmd_wipe() {
     base="$HOME"
   else
     base="${target_arg:-$(pwd)}"
+    base="$(normalize_absolute_path "$base")" || die "invalid target directory: ${base}"
   fi
 
   local entries=()
@@ -1110,6 +1302,170 @@ cmd_wipe() {
   done
 }
 
+cmd_sync_state() {
+  set_repos_dir
+  set_state_paths
+
+  local target_arg="" is_global=false include_imports=false sync_all=false force=false assume_yes=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --global|-g) is_global=true; shift ;;
+      --imports) include_imports=true; shift ;;
+      --all) sync_all=true; shift ;;
+      --force|-f) force=true; shift ;;
+      --yes|-y) assume_yes=true; shift ;;
+      *) target_arg="$1"; shift ;;
+    esac
+  done
+
+  $assume_yes && ! $force && die "--yes requires --force"
+  $is_global && [[ -n "$target_arg" ]] && die "cannot use --global with a target directory"
+
+  local base
+  if $sync_all; then
+    base=""
+  elif $is_global; then
+    base="$HOME"
+  else
+    base="${target_arg:-$(pwd)}"
+    base="$(normalize_absolute_path "$base")" || die "invalid target directory: ${base}"
+  fi
+
+  local entries=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && entries+=("$line")
+  done < <(
+    if $sync_all; then
+      manifest_list_all | while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local entry_type="${line%%|*}"
+        [[ "$entry_type" == "symlink" || "$include_imports" == "true" ]] || continue
+        echo "$line"
+      done
+    else
+      find_manifest_entries_in_base "$base" "$include_imports"
+    fi
+  )
+
+  [[ ${#entries[@]} -gt 0 ]] || { echo "nothing to sync"; return 0; }
+
+  local overwrite_paths=()
+  local restored_symlinks=0 restored_imports=0 skipped_existing=0 skipped_conflicts=0 skipped_missing_source=0 skipped_missing_base=0 skipped_unknown=0
+  local line entry_type remainder path origin repo_name skill_name source_dir target_base
+
+  for line in "${entries[@]}"; do
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    origin="${remainder#*|}"
+    repo_name="${origin%%/*}"
+    skill_name="${origin#*/}"
+    source_dir="${REPOS_DIR}/${repo_name}/skills/${skill_name}"
+
+    [[ -d "$source_dir" ]] || continue
+
+    if [[ "$entry_type" == "symlink" ]] && symlink_entry_is_valid "$path" "$origin"; then
+      continue
+    fi
+
+    if [[ "$entry_type" == "import" && -d "$path" && ! -L "$path" ]]; then
+      continue
+    fi
+
+    if [[ -e "$path" || -L "$path" ]]; then
+      overwrite_paths+=("$path")
+    fi
+  done
+
+  if [[ ${#overwrite_paths[@]} -gt 0 ]] && ! $force; then
+    for path in "${overwrite_paths[@]}"; do
+      echo "skipped (existing path; rerun with --force): ${path}"
+      ((skipped_conflicts+=1))
+    done
+    overwrite_paths=()
+  fi
+
+  if [[ ${#overwrite_paths[@]} -gt 0 ]] && ! $assume_yes; then
+    require_gum
+    echo ""
+    gum style --foreground 196 "WARNING: ${#overwrite_paths[@]} existing sync target(s) will be overwritten."
+    gum style --foreground 196 "This removes whatever is currently at each destination, even if it is not tracked by skillctl."
+    printf '%s\n' "${overwrite_paths[@]}"
+    echo ""
+    gum_confirm_tty "Proceed with sync-state overwrite for ${#overwrite_paths[@]} target(s)?" || { echo "aborted"; return 0; }
+  fi
+
+  for line in "${entries[@]}"; do
+    entry_type="${line%%|*}"
+    remainder="${line#*|}"
+    path="${remainder%%|*}"
+    origin="${remainder#*|}"
+    repo_name="${origin%%/*}"
+    skill_name="${origin#*/}"
+    source_dir="${REPOS_DIR}/${repo_name}/skills/${skill_name}"
+
+    if [[ ! -d "$source_dir" ]]; then
+      echo "skipped (missing source): ${path} <- ${source_dir}"
+      ((skipped_missing_source+=1))
+      continue
+    fi
+
+    if [[ "$entry_type" == "symlink" ]] && symlink_entry_is_valid "$path" "$origin"; then
+      ((skipped_existing+=1))
+      continue
+    fi
+
+    if [[ "$entry_type" == "import" && -d "$path" && ! -L "$path" ]]; then
+      ((skipped_existing+=1))
+      continue
+    fi
+
+    if [[ -e "$path" || -L "$path" ]]; then
+      if ! $force; then
+        continue
+      fi
+      rm -rf "$path"
+    fi
+
+    if ! target_base="$(infer_base_for_target "$path" "$skill_name")"; then
+      echo "skipped (unrecognized target path): ${path}"
+      ((skipped_unknown+=1))
+      continue
+    fi
+
+    if [[ ! -d "$target_base" ]]; then
+      echo "skipped (missing base directory): ${path}"
+      ((skipped_missing_base+=1))
+      continue
+    fi
+
+    mkdir -p "$(dirname "$path")"
+    if [[ "$entry_type" == "symlink" ]]; then
+      ln -s "$source_dir" "$path"
+      echo "restored symlink: ${path} -> ${source_dir}"
+      ((restored_symlinks+=1))
+    elif [[ "$entry_type" == "import" ]]; then
+      mkdir -p "$path"
+      cp -r "${source_dir}/." "$path/"
+      echo "restored import: ${path} (from ${origin})"
+      ((restored_imports+=1))
+    fi
+  done
+
+  echo ""
+  echo "sync summary:"
+  echo "  restored symlinks: ${restored_symlinks}"
+  if $include_imports; then
+    echo "  restored imports: ${restored_imports}"
+  fi
+  echo "  already present: ${skipped_existing}"
+  echo "  skipped conflicts: ${skipped_conflicts}"
+  echo "  skipped missing sources: ${skipped_missing_source}"
+  echo "  skipped missing base dirs: ${skipped_missing_base}"
+  echo "  skipped unknown targets: ${skipped_unknown}"
+}
+
 # ── list ─────────────────────────────────────────────────────────────────────
 
 cmd_list() {
@@ -1183,20 +1539,22 @@ skillctl - manage agent skills across harnesses
 usage:
   skillctl install <url|local-path>       clone/copy a skill repo
   skillctl config set clone-at <path>     set where repos are cloned/copied
+  skillctl config set state-dir <mode>    set where managed state is stored
   skillctl config list                    show current config values
   skillctl link [skill] [--global] [--project <path>] [--import] [--force|-f] [--yes|-y]
   skillctl unlink [skill] [--global] [--project <path>]
-  skillctl wipe [target-dir] [--global] [--imports] [--all] [--yes|-y]
+  skillctl wipe [target-dir] [--global|-g] [--imports] [--all] [--yes|-y]
+  skillctl sync-state [target-dir] [--global|-g] [--imports] [--all] [--force|-f] [--yes|-y]
   skillctl uninstall <repo-name>          remove repo and all symlinks
   skillctl update                         git pull all repos
   skillctl list                           show repos, skills, and link status
 
 flags:
   --import   copy files instead of symlinking (link command only)
-  --force, -f overwrite an existing link/import target when used with --import
+  --force, -f overwrite an existing link/import target when used with --import or sync-state
   --imports  also remove tracked imported copies (wipe command only)
   --migrate  move installed repos when changing clone-at
-  --global   target $HOME instead of current directory
+  --global, -g target $HOME instead of current directory
   --all      target all tracked locations (wipe command only)
   --project  target a specific project directory
   --yes, -y  skip confirmation prompts where supported
@@ -1204,6 +1562,9 @@ flags:
 notes:
   unlink removes both symlinks and imported copies. When removing an
   imported copy, you will be warned that any local changes will be lost.
+  sync-state recreates tracked symlinks or imports that are missing but
+  still present in the managed state file.
+  sync-state only overwrites existing paths when used with --force.
 EOF
 }
 
@@ -1213,6 +1574,7 @@ case "${1:-}" in
   link)      shift; cmd_link "$@" ;;
   unlink)    shift; cmd_unlink "$@" ;;
   wipe)      shift; cmd_wipe "$@" ;;
+  sync-state) shift; cmd_sync_state "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   update)    shift; cmd_update "$@" ;;
   list)      shift; cmd_list "$@" ;;

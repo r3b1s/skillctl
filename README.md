@@ -61,13 +61,13 @@ skillctl has built-in support for the following AI coding harnesses:
 | goose | `.goose/skills/<skill>` | `~/.goose/skills/<skill>` |
 | pi | `.pi/skills/<skill>` | `~/.pi/skills/<skill>` |
 | Qwen | `.qwen/skills/<skill>` | `~/.qwen/skills/<skill>` |
-| OpenAI Codex | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
+| OpenAI Codex | `.codex/skills/<skill>` | `~/.codex/skills/<skill>` |
 | OpenCode | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
 | Gemini CLI | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
 | amp | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
 | Warp | `.agents/skills/<skill>` | `~/.agents/skills/<skill>` |
 
-Many harnesses have converged on `.agents/skills/` as a shared convention. When selecting harnesses during `skillctl link`, you'll see a **"Most harnesses (.agents/)"** shortcut at the top of the list — this targets the `.agents/skills/` directory and covers Codex, Gemini, amp, Warp, OpenCode, and any other tool that follows the same convention. If you're unsure which harness-specific directory to use, `.agents/` is a reasonable default since it gives you the widest coverage with a single symlink.
+Many harnesses have converged on `.agents/skills/` as a shared convention. When selecting harnesses during `skillctl link`, you'll see a **"Most harnesses (.agents/)"** shortcut at the top of the list — this targets the `.agents/skills/` directory and covers Gemini, amp, Warp, OpenCode, and any other tool that follows the same convention. OpenAI Codex is separate and targets `.codex/skills/`.
 
 ## Commands
 
@@ -114,6 +114,26 @@ Show the current config values, including the active clone location.
 skillctl config list
 ```
 
+### `skillctl config set state-dir <config|clone-at>`
+
+Change where skillctl stores its managed state. `config` keeps state in `~/.config/skillctl`. `clone-at` stores it under `<clone-at>/.skillctl-state/`.
+
+```bash
+# Keep managed state in ~/.config/skillctl
+skillctl config set state-dir config
+
+# Store managed state alongside the cloned repos
+skillctl config set state-dir clone-at
+```
+
+When switching modes, skillctl moves the existing managed state files to the new location.
+
+### Shared managed state
+
+By default, skillctl stores its managed state in `~/.config/skillctl`. If you want to sync tracked links and imports across multiple machines that share the same repo layout and filesystem paths, switch `state-dir` to `clone-at` so state lives inside the configured repo root instead.
+
+When `state-dir = "clone-at"`, skillctl stores its managed state in `<clone-at>/.skillctl-state/` instead of `~/.config/skillctl/`.
+
 ---
 
 ### `skillctl link [skill] [--global] [--project <path>] [--import] [--force|-f] [--yes|-y]`
@@ -153,7 +173,7 @@ skillctl link my-skills/my-skill --import --force --yes --project ~/dev/myprojec
 
 If an import target already exists, `skillctl link --import` will leave it in place unless you add `--force` (or `-f`). With `--force`, skillctl shows one confirmation for the whole batch and lists every destination that will be overwritten. That overwrite applies whether or not the existing path is tracked by skillctl. Add `--yes` (or `-y`) to skip the prompt.
 
-Managed symlinks and imported copies are tracked in `~/.config/skillctl/managed`. Imported copies are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import --force`.
+Managed symlinks and imported copies are tracked in skillctl's active state directory. By default this is `~/.config/skillctl/managed`; with `state-dir = "clone-at"`, it becomes `<clone-at>/.skillctl-state/managed`. Imported copies are **not** updated automatically when the source repo changes — `skillctl update` will warn you about stale imports and show you how to refresh them by re-running the link command with `--import --force`.
 
 ---
 
@@ -197,6 +217,31 @@ skillctl wipe --all
 `wipe` only removes files and directories explicitly tracked by `skillctl`. Unmanaged directories are ignored, even if they live under a harness skills folder. With `--imports`, `wipe` also removes tracked imported copies after an additional warning that local changes will be permanently deleted.
 
 `--all` ignores the target directory and wipes every tracked symlink in the managed state file. Combined with `--imports`, it also removes every tracked imported copy.
+
+---
+
+### `skillctl sync-state [target-dir] [--global|-g] [--imports] [--all] [--force|-f] [--yes|-y]`
+
+Recreate tracked symlinks or imported copies that are missing but still present in the managed state file. This is mainly useful when you share state across multiple installations and want a machine to materialize links that another machine already recorded.
+
+```bash
+# Recreate missing tracked links under the current project
+skillctl sync-state
+
+# Recreate missing tracked global links
+skillctl sync-state --global
+
+# Recreate missing tracked imports too
+skillctl sync-state --imports --all
+
+# Overwrite conflicting existing targets after confirmation
+skillctl sync-state --all --force
+
+# Overwrite conflicting existing targets without prompting
+skillctl sync-state --all --force --yes
+```
+
+`sync-state` only creates missing tracked targets by default. If a path already exists but does not match the tracked state, skillctl leaves it alone and reports it as a skipped conflict. Add `--force` (or `-f`) to overwrite those existing paths after one confirmation prompt for the whole batch. Add `--yes` (or `-y`) with `--force` to skip that prompt.
 
 ---
 

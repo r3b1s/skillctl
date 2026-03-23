@@ -1,3 +1,26 @@
+## v0.1.2
+
+### Harness Paths
+
+- Changed `OpenAI Codex` to link and import skills under `.codex/skills/<skill>` and `~/.codex/skills/<skill>` instead of the shared `.agents` path.
+- Kept the shared "Most harnesses (.agents/)" shortcut on `.agents/skills/` for the other harnesses that still follow that convention.
+- Updated the harness picker copy and README harness table to clarify that OpenAI Codex is separate from the shared `.agents` target.
+
+### Wipe
+
+- Fixed `skillctl wipe` so tracked symlinks are discovered correctly when `clone-at` points to a non-default repo directory.
+- Fixed `skillctl wipe .` and other relative target paths by normalizing wipe targets to canonical absolute paths before matching tracked entries.
+- Added `-g` as a short alias for `skillctl wipe --global`.
+
+### Shared State
+
+- Added an opt-in `state-dir = "clone-at"` config mode so managed state can live under `<clone-at>/.skillctl-state/` instead of `~/.config/skillctl/`.
+- Added `skillctl config set state-dir <config|clone-at>` so the managed state location can be changed without editing `config.toml` by hand.
+- Added `skillctl sync-state` to recreate missing tracked symlinks or imported copies from the managed state file, which is useful when multiple installations share the same clone-at directory and state.
+- Added `--force` / `-f` and `--yes` / `-y` to `skillctl sync-state` so conflicting existing targets can be overwritten intentionally, with batch confirmation by default.
+- Updated `skillctl config list` to show both the active state mode and the resolved state path.
+- Fixed `skillctl config set clone-at --yes` so it can create a missing target clone-at directory without prompting for TTY confirmation.
+
 ## v0.1.1
 
 ### Repo Storage
